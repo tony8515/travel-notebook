@@ -3,10 +3,10 @@
 import { ChangeEvent, useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 
-type TravelEntry = {
+type Entry = {
   id: string;
   trip: string | null;
-  date: string | null;
+  date: string;
   location: string | null;
   campground: string | null;
   site: string | null;
@@ -16,18 +16,25 @@ type TravelEntry = {
   rating: number | null;
   notes: string | null;
   photo_urls: string[] | null;
-  created_at: string | null;
 };
 
 function todayYMD() {
-  const d = new Date();
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
+  return new Date().toISOString().slice(0, 10);
+}
+
+function mapLink(location: string | null) {
+  if (!location) return "#";
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
+    location
+  )}`;
 }
 
 export default function Page() {
+  const [entries, setEntries] = useState<Entry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState("");
+
   const [trip, setTrip] = useState("2026 Spring Road Trip");
   const [date, setDate] = useState(todayYMD());
   const [location, setLocation] = useState("");
@@ -38,35 +45,35 @@ export default function Page() {
   const [noise, setNoise] = useState("");
   const [rating, setRating] = useState<number>(0);
   const [notes, setNotes] = useState("");
-  const [entries, setEntries] = useState<TravelEntry[]>([]);
-  const [msg, setMsg] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+
   const [editingId, setEditingId] = useState<string | null>(null);
   const [existingPhotoUrls, setExistingPhotoUrls] = useState<string[]>([]);
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
 
   useEffect(() => {
     loadEntries();
   }, []);
 
   async function loadEntries() {
+    setLoading(true);
+
     const { data, error } = await supabase
       .from("travel_entries")
-      .select(
-        "id, trip, date, location, campground, site, water, bathroom, noise, rating, notes, photo_urls, created_at"
-      )
-      .order("date", { ascending: true })
-      .order("created_at", { ascending: true });
+      .select("*")
+      .order("date", { ascending: true });
 
     if (error) {
       setMsg("불러오기 실패: " + error.message);
+      setLoading(false);
       return;
     }
 
-    setEntries((data ?? []) as TravelEntry[]);
+    setEntries((data as Entry[]) || []);
+    setLoading(false);
   }
 
   function resetForm() {
+    setEditingId(null);
     setTrip("2026 Spring Road Trip");
     setDate(todayYMD());
     setLocation("");
@@ -77,14 +84,13 @@ export default function Page() {
     setNoise("");
     setRating(0);
     setNotes("");
-    setSelectedFiles([]);
     setExistingPhotoUrls([]);
-    setEditingId(null);
+    setSelectedFiles([]);
+    setMsg("");
   }
 
   function handleFilesChange(e: ChangeEvent<HTMLInputElement>) {
     const files = Array.from(e.target.files ?? []);
-    console.log("files selected =", files);
     setSelectedFiles(files);
   }
 
@@ -98,7 +104,6 @@ export default function Page() {
       const safeName = `${Date.now()}-${Math.random()
         .toString(36)
         .slice(2)}.${ext}`;
-
       const filePath = `travel/${safeName}`;
 
       const { error: uploadError } = await supabase.storage
@@ -119,15 +124,12 @@ export default function Page() {
       uploadedUrls.push(data.publicUrl);
     }
 
-    console.log("uploadedUrls =", uploadedUrls);
     return uploadedUrls;
   }
 
   async function saveEntry() {
     setMsg("");
     setSaving(true);
-
-    console.log("selectedFiles at save =", selectedFiles);
 
     try {
       let newPhotoUrls: string[] = [];
@@ -136,21 +138,15 @@ export default function Page() {
         newPhotoUrls = await uploadPhotos();
       }
 
-      console.log("newPhotoUrls =", newPhotoUrls);
-      console.log("existingPhotoUrls =", existingPhotoUrls);
-
-      let mergedPhotoUrls: string[] | null = null;
-
-      if (editingId !== null) {
-        mergedPhotoUrls = [...existingPhotoUrls, ...newPhotoUrls];
-      } else {
-        mergedPhotoUrls = newPhotoUrls.length > 0 ? newPhotoUrls : null;
-      }
-
-      console.log("mergedPhotoUrls =", mergedPhotoUrls);
+      const mergedPhotoUrls =
+        editingId !== null
+          ? [...existingPhotoUrls, ...newPhotoUrls]
+          : newPhotoUrls.length > 0
+          ? newPhotoUrls
+          : null;
 
       if (editingId) {
-        const { data, error } = await supabase
+        const { error } = await supabase
           .from("travel_entries")
           .update({
             trip: trip || null,
@@ -165,10 +161,7 @@ export default function Page() {
             notes: notes || null,
             photo_urls: mergedPhotoUrls,
           })
-          .eq("id", editingId)
-          .select();
-
-        console.log("update result =", data);
+          .eq("id", editingId);
 
         if (error) {
           setMsg("수정 실패: " + error.message);
@@ -213,7 +206,7 @@ export default function Page() {
   }
 
   async function deleteEntry(id: string) {
-    const ok = window.confirm("이 기록을 삭제할까요?");
+    const ok = confirm("이 기록을 삭제할까요?");
     if (!ok) return;
 
     const { error } = await supabase.from("travel_entries").delete().eq("id", id);
@@ -223,18 +216,14 @@ export default function Page() {
       return;
     }
 
-    if (editingId === id) {
-      resetForm();
-    }
-
     setMsg("삭제되었습니다.");
     await loadEntries();
   }
 
-  function startEdit(entry: TravelEntry) {
+  function startEdit(entry: Entry) {
     setEditingId(entry.id);
-    setTrip(entry.trip ?? "2026 Spring Road Trip");
-    setDate(entry.date ?? todayYMD());
+    setTrip(entry.trip ?? "");
+    setDate(entry.date);
     setLocation(entry.location ?? "");
     setCampground(entry.campground ?? "");
     setSite(entry.site ?? "");
@@ -259,25 +248,33 @@ export default function Page() {
     setExistingPhotoUrls(copy);
   }
 
-  function mapLink(location: string | null) {
-    if (!location) return "#";
-    return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
-      location
-    )}`;
-  }
-
   function openTripMap() {
-    if (!entries || entries.length === 0) return;
+    if (!entries || entries.length < 2) return;
 
-    const locations = entries
+    const locations = [...entries]
+      .sort((a, b) => String(a.date).localeCompare(String(b.date)))
       .map((e) => e.location)
       .filter((l): l is string => !!l && l.trim() !== "");
 
-    if (locations.length === 0) return;
+    if (locations.length < 2) return;
 
-    const url =
-"https://www.google.com/maps/dir/?api=1&waypoints=" +
-locations.map((l) => encodeURIComponent(l)).join("|");
+    const origin = locations[0];
+    const destination = locations[locations.length - 1];
+    const waypoints = locations.slice(1, -1);
+
+    let url =
+      "https://www.google.com/maps/dir/?api=1" +
+      "&origin=" +
+      encodeURIComponent(origin) +
+      "&destination=" +
+      encodeURIComponent(destination) +
+      "&travelmode=driving";
+
+    if (waypoints.length > 0) {
+      url +=
+        "&waypoints=" +
+        waypoints.map((w) => encodeURIComponent(w)).join("|");
+    }
 
     window.open(url, "_blank");
   }
@@ -295,124 +292,158 @@ locations.map((l) => encodeURIComponent(l)).join("|");
 
     if (index === -1 || index === sorted.length - 1) return;
 
-    const from = String(sorted[index].location);
-    const to = String(sorted[index + 1].location);
+    const from = String(sorted[index].location || "");
+    const to = String(sorted[index + 1].location || "");
+
+    if (!from || !to) return;
 
     const url =
-      "https://www.google.com/maps/dir/" +
+      "https://www.google.com/maps/dir/?api=1" +
+      "&origin=" +
       encodeURIComponent(from) +
-      "/" +
-      encodeURIComponent(to);
+      "&destination=" +
+      encodeURIComponent(to) +
+      "&travelmode=driving";
 
     window.open(url, "_blank");
   }
 
-  function StarButton({
-    value,
-    current,
-    onClick,
-  }: {
-    value: number;
-    current: number;
-    onClick: (value: number) => void;
-  }) {
-    return (
-      <button
-        type="button"
-        onClick={() => onClick(value)}
+  return (
+    <div
+      style={{
+        maxWidth: 760,
+        margin: "0 auto",
+        padding: 16,
+        background: "#ffffff",
+        color: "#111111",
+        minHeight: "100vh",
+      }}
+    >
+      <h1 style={{ marginBottom: 4, fontSize: 48, lineHeight: 1.05 }}>
+        Travel Notebook
+      </h1>
+      <div style={{ marginBottom: 16, fontSize: 18 }}>Road Trip 기록</div>
+
+      <div
         style={{
-          border: "none",
-          background: "transparent",
-          fontSize: 28,
-          cursor: "pointer",
-          padding: "0 4px",
+          display: "flex",
+          gap: 12,
+          flexWrap: "wrap",
+          marginBottom: 20,
         }}
       >
-        {value <= current ? "★" : "☆"}
-      </button>
-    );
-  }
-
-  return (
-    <div style={{ maxWidth: 900, margin: "40px auto", fontFamily: "Arial" }}>
-      <h1>Travel Notebook</h1>
-      <p>Road Trip 기록</p>
-
-      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 20 }}>
         <button
+          type="button"
           onClick={openTripMap}
-          style={{ padding: "10px 18px", fontSize: 16, cursor: "pointer" }}
+          style={{
+            padding: "12px 18px",
+            cursor: "pointer",
+            background: "#f3f6fb",
+            color: "#111111",
+            border: "1px solid #cfd8e3",
+            borderRadius: 10,
+            fontWeight: 700,
+            fontSize: 16,
+          }}
         >
-          🗺 Open Road Trip Map
+          🗺️ Open Road Trip Map
         </button>
 
         <button
+          type="button"
           onClick={openNextDrive}
-          style={{ padding: "10px 18px", fontSize: 16, cursor: "pointer" }}
+          style={{
+            padding: "12px 18px",
+            cursor: "pointer",
+            background: "#f3f6fb",
+            color: "#111111",
+            border: "1px solid #cfd8e3",
+            borderRadius: 10,
+            fontWeight: 700,
+            fontSize: 16,
+          }}
         >
           🚗 Drive to Next Destination
         </button>
       </div>
 
-      <input
-        placeholder="Trip (예: 2026 Spring Road Trip)"
-        value={trip}
-        onChange={(e) => setTrip(e.target.value)}
-        style={{ width: "100%", padding: 10, marginBottom: 10 }}
-      />
+      <div style={{ marginBottom: 12 }}>
+        <input
+          value={trip}
+          onChange={(e) => setTrip(e.target.value)}
+          placeholder="Trip (예: 2026 Spring Road Trip)"
+          style={inputStyle}
+        />
+      </div>
 
-      <input
-        type="date"
-        value={date}
-        onChange={(e) => setDate(e.target.value)}
-        style={{ width: "100%", padding: 10, marginBottom: 10 }}
-      />
+      <div style={{ marginBottom: 12 }}>
+        <input
+          type="date"
+          value={date}
+          onChange={(e) => setDate(e.target.value)}
+          style={inputStyle}
+        />
+      </div>
 
-      <input
-        placeholder="Location (예: Zion National Park)"
-        value={location}
-        onChange={(e) => setLocation(e.target.value)}
-        style={{ width: "100%", padding: 10, marginBottom: 10 }}
-      />
+      <div style={{ marginBottom: 12 }}>
+        <input
+          value={location}
+          onChange={(e) => setLocation(e.target.value)}
+          placeholder="Location (예: Zion National Park)"
+          style={inputStyle}
+        />
+      </div>
 
-      <input
-        placeholder="Campground (예: Watchman CG)"
-        value={campground}
-        onChange={(e) => setCampground(e.target.value)}
-        style={{ width: "100%", padding: 10, marginBottom: 10 }}
-      />
+      <div style={{ marginBottom: 12 }}>
+        <input
+          value={campground}
+          onChange={(e) => setCampground(e.target.value)}
+          placeholder="Campground (예: Watchman CG)"
+          style={inputStyle}
+        />
+      </div>
 
-      <input
-        placeholder="Site Number (예: B32)"
-        value={site}
-        onChange={(e) => setSite(e.target.value)}
-        style={{ width: "100%", padding: 10, marginBottom: 10 }}
-      />
+      <div style={{ marginBottom: 12 }}>
+        <input
+          value={site}
+          onChange={(e) => setSite(e.target.value)}
+          placeholder="Site Number (예: B32)"
+          style={inputStyle}
+        />
+      </div>
 
-      <input
-        placeholder="Water (예: Yes / No)"
-        value={water}
-        onChange={(e) => setWater(e.target.value)}
-        style={{ width: "100%", padding: 10, marginBottom: 10 }}
-      />
+      <div style={{ marginBottom: 12 }}>
+        <input
+          value={water}
+          onChange={(e) => setWater(e.target.value)}
+          placeholder="Water (예: Yes / No)"
+          style={inputStyle}
+        />
+      </div>
 
-      <input
-        placeholder="Bathroom (예: Good / OK / Bad)"
-        value={bathroom}
-        onChange={(e) => setBathroom(e.target.value)}
-        style={{ width: "100%", padding: 10, marginBottom: 10 }}
-      />
+      <div style={{ marginBottom: 12 }}>
+        <input
+          value={bathroom}
+          onChange={(e) => setBathroom(e.target.value)}
+          placeholder="Bathroom (예: Good / OK / Bad)"
+          style={inputStyle}
+        />
+      </div>
 
-      <input
-        placeholder="Noise (예: Quiet / Medium / Loud)"
-        value={noise}
-        onChange={(e) => setNoise(e.target.value)}
-        style={{ width: "100%", padding: 10, marginBottom: 10 }}
-      />
+      <div style={{ marginBottom: 12 }}>
+        <input
+          value={noise}
+          onChange={(e) => setNoise(e.target.value)}
+          placeholder="Noise (예: Quiet / Medium / Loud)"
+          style={inputStyle}
+        />
+      </div>
 
-      <div style={{ marginBottom: 10 }}>
-        <div style={{ marginBottom: 6 }}>Rating</div>
-        <div>
+      <div style={{ marginBottom: 12 }}>
+        <div style={{ marginBottom: 8, fontWeight: 700, fontSize: 18 }}>
+          Rating
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {[1, 2, 3, 4, 5].map((n) => (
             <StarButton
               key={n}
@@ -424,41 +455,46 @@ locations.map((l) => encodeURIComponent(l)).join("|");
         </div>
       </div>
 
-      <textarea
-        placeholder="Notes"
-        value={notes}
-        onChange={(e) => setNotes(e.target.value)}
-        style={{ width: "100%", padding: 10, height: 120, marginBottom: 10 }}
-      />
+      <div style={{ marginBottom: 12 }}>
+        <textarea
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          placeholder="Notes"
+          rows={6}
+          style={{
+            ...inputStyle,
+            resize: "vertical",
+            minHeight: 150,
+          }}
+        />
+      </div>
 
       {editingId && existingPhotoUrls.length > 0 && (
         <div style={{ marginBottom: 14 }}>
-          <div style={{ marginBottom: 8 }}>현재 저장된 사진</div>
+          <div style={{ marginBottom: 8, fontWeight: 700 }}>현재 사진</div>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            {existingPhotoUrls.map((url, idx) => (
-              <div key={idx} style={{ textAlign: "center" }}>
-                <a href={url} target="_blank" rel="noreferrer">
-                  <img
-                    src={url}
-                    alt={`existing-${idx}`}
-                    style={{
-                      width: 120,
-                      height: 90,
-                      objectFit: "cover",
-                      borderRadius: 8,
-                      border: "1px solid #ccc",
-                    }}
-                  />
-                </a>
-                <div style={{ marginTop: 6 }}>
-                  <button
-                    type="button"
-                    onClick={() => removeExistingPhoto(idx)}
-                    style={{ cursor: "pointer" }}
-                  >
-                    Remove
-                  </button>
-                </div>
+            {existingPhotoUrls.map((url, index) => (
+              <div key={url + index}>
+                <img
+                  src={url}
+                  alt="travel"
+                  style={{
+                    width: 120,
+                    height: 90,
+                    objectFit: "cover",
+                    borderRadius: 8,
+                    border: "1px solid #ddd",
+                    display: "block",
+                    marginBottom: 6,
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={() => removeExistingPhoto(index)}
+                  style={smallDangerButtonStyle}
+                >
+                  Remove
+                </button>
               </div>
             ))}
           </div>
@@ -466,76 +502,54 @@ locations.map((l) => encodeURIComponent(l)).join("|");
       )}
 
       <div style={{ marginBottom: 10 }}>
-        <div style={{ marginBottom: 6 }}>
+        <div style={{ marginBottom: 8, fontWeight: 700 }}>
           Photos {editingId ? "(새 사진 추가 가능)" : ""}
         </div>
-<div style={{ marginBottom: 10 }}>
-  <div style={{ marginBottom: 6 }}>Photos</div>
 
-  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-    
-    {/* 갤러리 선택 */}
-    <label
-style={{
-  padding: "10px 16px",
-  border: "1px solid #bdbdbd",
-  borderRadius: 8,
-  cursor: "pointer",
-  background: "#ffffff",
-  color: "#111111",
-  fontWeight: 600,
-  display: "inline-block"
-}}
-    >
-      📁 Choose Photos
-      <input
-        type="file"
-        accept="image/*"
-        multiple
-        onChange={handleFilesChange}
-        style={{ display: "none" }}
-      />
-    </label>
-    {/* 카메라 촬영 */}
-    <label
-      style={{
-        padding: "8px 14px",
-        border: "1px solid #ccc",
-        borderRadius: 6,
-        cursor: "pointer",
-        background: "#f8f8f8"
-      }}
-    >
-      📷 Take Photo
-      <input
-        type="file"
-        accept="image/*"
-        capture="environment"
-        onChange={handleFilesChange}
-        style={{ display: "none" }}
-      />
-    </label>
-  </div>
-  {selectedFiles.length > 0 && (
-    <div style={{ marginTop: 8 }}>
-      선택된 사진: {selectedFiles.length}장
-    </div>
-  )}
-</div>
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+          <label style={photoButtonStyle}>
+            📁 Choose Photos
+            <input
+              type="file"
+              accept="image/*"
+              multiple
+              onChange={handleFilesChange}
+              style={{ display: "none" }}
+            />
+          </label>
+
+          <label style={photoButtonStyle}>
+            📷 Take Photo
+            <input
+              type="file"
+              accept="image/*"
+              capture="environment"
+              onChange={handleFilesChange}
+              style={{ display: "none" }}
+            />
+          </label>
+        </div>
+
         {selectedFiles.length > 0 && (
-          <div style={{ marginTop: 8, color: "#444" }}>
+          <div style={{ marginTop: 8, color: "#333", fontWeight: 600 }}>
             선택된 사진: {selectedFiles.length}장
           </div>
         )}
       </div>
 
-      <div style={{ display: "flex", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
+      <div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
         <button
           onClick={saveEntry}
           disabled={saving}
           style={{
-            padding: "10px 20px",
+            padding: "12px 22px",
             cursor: "pointer",
+            background: "#0d6efd",
+            color: "#ffffff",
+            border: "none",
+            borderRadius: 8,
+            fontWeight: 700,
+            fontSize: 16,
           }}
         >
           {saving ? "Saving..." : editingId ? "Update" : "Save"}
@@ -546,8 +560,14 @@ style={{
             type="button"
             onClick={resetForm}
             style={{
-              padding: "10px 20px",
+              padding: "12px 22px",
               cursor: "pointer",
+              background: "#f1f3f5",
+              color: "#111111",
+              border: "1px solid #ced4da",
+              borderRadius: 8,
+              fontWeight: 700,
+              fontSize: 16,
             }}
           >
             Cancel Edit
@@ -555,123 +575,230 @@ style={{
         )}
       </div>
 
-      {msg ? <p style={{ marginTop: 12 }}>{msg}</p> : null}
+      {msg && (
+        <p
+          style={{
+            marginTop: 14,
+            color: msg.includes("실패") ? "#c62828" : "#1b5e20",
+            fontWeight: 700,
+          }}
+        >
+          {msg}
+        </p>
+      )}
 
-      <hr style={{ margin: "30px 0" }} />
+      <hr style={{ margin: "28px 0" }} />
 
-      <h2>Saved Entries</h2>
+      <h2 style={{ fontSize: 32, marginBottom: 14 }}>Saved Entries</h2>
 
-      {entries.length === 0 ? (
+      {loading ? (
+        <p>불러오는 중...</p>
+      ) : entries.length === 0 ? (
         <p>아직 저장된 기록이 없습니다.</p>
       ) : (
-        entries.map((entry) => (
-          <div
-            key={entry.id}
-            style={{
-              border: "1px solid #ddd",
-              padding: 12,
-              marginBottom: 12,
-              borderRadius: 8,
-            }}
-          >
-            <div><strong>Trip:</strong> {entry.trip}</div>
-            <div><strong>Date:</strong> {entry.date}</div>
-
-            <div>
-              <strong>Location:</strong>{" "}
-              {entry.location ? (
-                <a
-                  href={mapLink(entry.location)}
-                  target="_blank"
-                  rel="noreferrer"
-           style={{
-  color: "#0056cc",
-  textDecoration: "underline",
-  fontWeight: 600
-}}
-                >
-                  {entry.location}
-                </a>
-              ) : (
-                ""
-              )}
-            </div>
-
-            <div>
-              <strong>Campground:</strong>{" "}
-              {entry.campground ? (
-                <a
-                  href={mapLink(
-                    `${entry.campground}${entry.location ? ", " + entry.location : ""}`
-                  )}
-                  target="_blank"
-                  rel="noreferrer"
-                  style={{ color: "#0a58ca", textDecoration: "underline" }}
-                >
-                  {entry.campground}
-                </a>
-              ) : (
-                ""
-              )}
-            </div>
-
-            <div><strong>Site:</strong> {entry.site}</div>
-            <div><strong>Water:</strong> {entry.water}</div>
-            <div><strong>Bathroom:</strong> {entry.bathroom}</div>
-            <div><strong>Noise:</strong> {entry.noise}</div>
-            <div><strong>Rating:</strong> {entry.rating ?? ""}</div>
-
-            <div style={{ whiteSpace: "pre-wrap", marginTop: 8 }}>
-              {entry.notes}
-            </div>
-
-            {entry.photo_urls && entry.photo_urls.length > 0 && (
-              <div
-                style={{
-                  display: "flex",
-                  gap: 10,
-                  flexWrap: "wrap",
-                  marginTop: 12,
-                }}
-              >
-                {entry.photo_urls.map((url, idx) => (
-                  <a key={idx} href={url} target="_blank" rel="noreferrer">
-                    <img
-                      src={url}
-                      alt={`travel-${idx}`}
-                      style={{
-                        width: 140,
-                        height: 100,
-                        objectFit: "cover",
-                        borderRadius: 8,
-                        border: "1px solid #ccc",
-                        cursor: "pointer",
-                      }}
-                    />
-                  </a>
-                ))}
+        [...entries]
+          .sort((a, b) => String(a.date).localeCompare(String(b.date)))
+          .map((entry) => (
+            <div
+              key={entry.id}
+              style={{
+                border: "1px solid #d9d9d9",
+                borderRadius: 12,
+                padding: 14,
+                marginBottom: 16,
+                background: "#ffffff",
+              }}
+            >
+              <div>
+                <strong>Trip:</strong> {entry.trip}
               </div>
-            )}
+              <div>
+                <strong>Date:</strong> {entry.date}
+              </div>
+              <div>
+                <strong>Location:</strong>{" "}
+                {entry.location ? (
+                  <a
+                    href={mapLink(entry.location)}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{
+                      color: "#0056cc",
+                      textDecoration: "underline",
+                      fontWeight: 700,
+                    }}
+                  >
+                    {entry.location}
+                  </a>
+                ) : (
+                  ""
+                )}
+              </div>
+              <div>
+                <strong>Campground:</strong>{" "}
+                {entry.campground ? (
+                  <a
+                    href={mapLink(
+                      `${entry.campground}${entry.location ? ", " + entry.location : ""}`
+                    )}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{
+                      color: "#0056cc",
+                      textDecoration: "underline",
+                      fontWeight: 700,
+                    }}
+                  >
+                    {entry.campground}
+                  </a>
+                ) : (
+                  ""
+                )}
+              </div>
+              <div>
+                <strong>Site:</strong> {entry.site}
+              </div>
+              <div>
+                <strong>Water:</strong> {entry.water}
+              </div>
+              <div>
+                <strong>Bathroom:</strong> {entry.bathroom}
+              </div>
+              <div>
+                <strong>Noise:</strong> {entry.noise}
+              </div>
+              <div>
+                <strong>Rating:</strong> {entry.rating}
+              </div>
 
-            <div style={{ marginTop: 12, display: "flex", gap: 10 }}>
-              <button
-                type="button"
-                onClick={() => startEdit(entry)}
-                style={{ cursor: "pointer" }}
-              >
-                Edit
-              </button>
-              <button
-                type="button"
-                onClick={() => deleteEntry(entry.id)}
-                style={{ cursor: "pointer" }}
-              >
-                Delete
-              </button>
+              {entry.notes && (
+                <div style={{ marginTop: 10, whiteSpace: "pre-wrap" }}>
+                  {entry.notes}
+                </div>
+              )}
+
+              {entry.photo_urls && entry.photo_urls.length > 0 && (
+                <div
+                  style={{
+                    marginTop: 12,
+                    display: "flex",
+                    gap: 10,
+                    flexWrap: "wrap",
+                  }}
+                >
+                  {entry.photo_urls.map((url, i) => (
+                    <a
+                      key={url + i}
+                      href={url}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      <img
+                        src={url}
+                        alt="travel"
+                        style={{
+                          width: 120,
+                          height: 90,
+                          objectFit: "cover",
+                          borderRadius: 8,
+                          border: "1px solid #ddd",
+                        }}
+                      />
+                    </a>
+                  ))}
+                </div>
+              )}
+
+              <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
+                <button
+                  type="button"
+                  onClick={() => startEdit(entry)}
+                  style={smallButtonStyle}
+                >
+                  Edit
+                </button>
+                <button
+                  type="button"
+                  onClick={() => deleteEntry(entry.id)}
+                  style={smallDangerButtonStyle}
+                >
+                  Delete
+                </button>
+              </div>
             </div>
-          </div>
-        ))
+          ))
       )}
     </div>
   );
 }
+
+function StarButton({
+  value,
+  current,
+  onClick,
+}: {
+  value: number;
+  current: number;
+  onClick: (value: number) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onClick(value)}
+      style={{
+        border: "none",
+        background: "transparent",
+        fontSize: 34,
+        cursor: "pointer",
+        color: value <= current ? "#f5b301" : "#999999",
+        lineHeight: 1,
+      }}
+      aria-label={`rate ${value}`}
+      title={`${value}점`}
+    >
+      ★
+    </button>
+  );
+}
+
+const inputStyle: React.CSSProperties = {
+  width: "100%",
+  padding: "14px 12px",
+  border: "1px solid #cfcfcf",
+  borderRadius: 8,
+  fontSize: 16,
+  background: "#ffffff",
+  color: "#111111",
+  boxSizing: "border-box",
+};
+
+const photoButtonStyle: React.CSSProperties = {
+  padding: "10px 16px",
+  border: "1px solid #bdbdbd",
+  borderRadius: 8,
+  cursor: "pointer",
+  background: "#ffffff",
+  color: "#111111",
+  fontWeight: 700,
+  display: "inline-block",
+};
+
+const smallButtonStyle: React.CSSProperties = {
+  padding: "8px 12px",
+  cursor: "pointer",
+  background: "#f1f3f5",
+  color: "#111111",
+  border: "1px solid #ced4da",
+  borderRadius: 6,
+  fontWeight: 700,
+};
+
+const smallDangerButtonStyle: React.CSSProperties = {
+  padding: "8px 12px",
+  cursor: "pointer",
+  background: "#fff5f5",
+  color: "#b42318",
+  border: "1px solid #f1b0b7",
+  borderRadius: 6,
+  fontWeight: 700,
+};
