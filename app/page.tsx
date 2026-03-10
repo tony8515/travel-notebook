@@ -277,8 +277,8 @@ export default function Page() {
     if (locations.length === 0) return;
 
     const url =
-      "https://www.google.com/maps/dir/" +
-      locations.map((l) => encodeURIComponent(l)).join("/");
+"https://www.google.com/maps/dir/?api=1&waypoints=" +
+locations.map((l) => encodeURIComponent(l)).join("|");
 
     window.open(url, "_blank");
   }
