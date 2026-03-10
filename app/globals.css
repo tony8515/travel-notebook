@@ -40,3 +40,23 @@ a {
     color-scheme: dark;
   }
 }
+html, body {
+  background: #ffffff;
+  color: #111111;
+  color-scheme: light;
+}
+input, textarea, select, button {
+  color: #111111;
+  background: #ffffff;
+  border: 1px solid #cfcfcf;
+}
+input::placeholder,
+textarea::placeholder {
+  color: #777777;
+}
+a {
+  color: #0a58ca;
+}
+button {
+  opacity: 1 !important;
+}

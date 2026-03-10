@@ -271,8 +271,7 @@ export default function Page() {
 
     const locations = entries
       .map((e) => e.location)
-      .filter((l): l is string => !!l && l.trim() !== "")
-      .reverse();
+      .filter((l): l is string => !!l && l.trim() !== "");
 
     if (locations.length === 0) return;
 
@@ -477,13 +476,16 @@ locations.map((l) => encodeURIComponent(l)).join("|");
     
     {/* 갤러리 선택 */}
     <label
-      style={{
-        padding: "8px 14px",
-        border: "1px solid #ccc",
-        borderRadius: 6,
-        cursor: "pointer",
-        background: "#f8f8f8"
-      }}
+style={{
+  padding: "10px 16px",
+  border: "1px solid #bdbdbd",
+  borderRadius: 8,
+  cursor: "pointer",
+  background: "#ffffff",
+  color: "#111111",
+  fontWeight: 600,
+  display: "inline-block"
+}}
     >
       📁 Choose Photos
       <input
@@ -582,7 +584,11 @@ locations.map((l) => encodeURIComponent(l)).join("|");
                   href={mapLink(entry.location)}
                   target="_blank"
                   rel="noreferrer"
-                  style={{ color: "#0a58ca", textDecoration: "underline" }}
+           style={{
+  color: "#0056cc",
+  textDecoration: "underline",
+  fontWeight: 600
+}}
                 >
                   {entry.location}
                 </a>
