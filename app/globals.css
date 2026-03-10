@@ -32,3 +32,8 @@ textarea::placeholder {
 button {
   opacity: 1 !important;
 }
+.leaflet-container {
+  width: 100%;
+  height: 500px;
+  margin-top: 20px;
+}

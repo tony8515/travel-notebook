@@ -1,7 +1,17 @@
 "use client";
 
-import { ChangeEvent, useEffect, useState } from "react";
+import { ChangeEvent, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import {
+  MapContainer,
+  TileLayer,
+  CircleMarker,
+  Polyline,
+  Popup,
+  Tooltip,
+  useMap,
+} from "react-leaflet";
+import "leaflet/dist/leaflet.css";
 
 type Entry = {
   id: string;
@@ -18,6 +28,14 @@ type Entry = {
   photo_urls: string[] | null;
 };
 
+type MapPoint = {
+  order: number;
+  label: string;
+  date: string;
+  lat: number;
+  lng: number;
+};
+
 function todayYMD() {
   return new Date().toISOString().slice(0, 10);
 }
@@ -27,6 +45,24 @@ function mapLink(location: string | null) {
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
     location
   )}`;
+}
+
+function MapAutoFit({ points }: { points: MapPoint[] }) {
+  const map = useMap();
+
+  useEffect(() => {
+    if (!points.length) return;
+
+    if (points.length === 1) {
+      map.setView([points[0].lat, points[0].lng], 8);
+      return;
+    }
+
+    const bounds = points.map((p) => [p.lat, p.lng] as [number, number]);
+    map.fitBounds(bounds, { padding: [40, 40] });
+  }, [map, points]);
+
+  return null;
 }
 
 export default function Page() {
@@ -50,9 +86,18 @@ export default function Page() {
   const [existingPhotoUrls, setExistingPhotoUrls] = useState<string[]>([]);
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
 
+  const [showMap, setShowMap] = useState(false);
+  const [mapLoading, setMapLoading] = useState(false);
+  const [mapPoints, setMapPoints] = useState<MapPoint[]>([]);
+  const [geoCache, setGeoCache] = useState<Record<string, { lat: number; lng: number }>>({});
+
   useEffect(() => {
     loadEntries();
   }, []);
+
+  const sortedEntries = useMemo(() => {
+    return [...entries].sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  }, [entries]);
 
   async function loadEntries() {
     setLoading(true);
@@ -248,21 +293,82 @@ export default function Page() {
     setExistingPhotoUrls(copy);
   }
 
-function openTripMap() {
-  if (!entries || entries.length < 2) return;
+  async function geocodeLocation(query: string): Promise<{ lat: number; lng: number } | null> {
+    const res = await fetch(
+      `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(
+        query
+      )}`
+    );
 
-  const locations = entries
-    .map((e) => e.location)
-    .filter((l): l is string => !!l && l.trim() !== "");
+    if (!res.ok) return null;
 
-  if (locations.length < 2) return;
+    const data = await res.json();
 
-  const url =
-    "https://www.google.com/maps/dir/" +
-    locations.map((l) => encodeURIComponent(l)).join("/");
+    if (!Array.isArray(data) || data.length === 0) return null;
 
-  window.open(url, "_blank");
-}
+    return {
+      lat: Number(data[0].lat),
+      lng: Number(data[0].lon),
+    };
+  }
+
+  async function openTripMap() {
+    if (!sortedEntries || sortedEntries.length < 2) {
+      setMsg("지도에 표시할 기록이 아직 부족합니다.");
+      return;
+    }
+
+    setShowMap(true);
+    setMapLoading(true);
+    setMsg("");
+
+    try {
+      const nextCache = { ...geoCache };
+      const points: MapPoint[] = [];
+
+      for (const entry of sortedEntries) {
+        const loc = entry.location?.trim();
+        if (!loc) continue;
+
+        let coords = nextCache[loc];
+
+        if (!coords) {
+          const found = await geocodeLocation(loc);
+          if (!found) continue;
+          coords = found;
+          nextCache[loc] = coords;
+        }
+
+        points.push({
+          order: points.length + 1,
+          label: loc,
+          date: entry.date,
+          lat: coords.lat,
+          lng: coords.lng,
+        });
+      }
+
+      setGeoCache(nextCache);
+      setMapPoints(points);
+
+      if (points.length === 0) {
+        setMsg("지도 좌표를 찾지 못했습니다.");
+      } else {
+        setMsg(`지도에 ${points.length}개 장소를 표시했습니다.`);
+      }
+
+      setTimeout(() => {
+        const el = document.getElementById("road-trip-map");
+        if (el) {
+          el.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+      }, 100);
+    } catch (err: any) {
+      setMsg("지도 준비 실패: " + (err?.message || "알 수 없는 오류"));
+    } finally {
+      setMapLoading(false);
+    }
+  }
 
   function openNextDrive() {
     if (!entries || entries.length < 2) return;
@@ -272,7 +378,6 @@ function openTripMap() {
     );
 
     const today = new Date().toISOString().slice(0, 10);
-
     const index = sorted.findIndex((e) => String(e.date) >= today);
 
     if (index === -1 || index === sorted.length - 1) return;
@@ -292,6 +397,10 @@ function openTripMap() {
 
     window.open(url, "_blank");
   }
+
+  const polylinePositions = mapPoints.map(
+    (p) => [p.lat, p.lng] as [number, number]
+  );
 
   return (
     <div
@@ -351,6 +460,66 @@ function openTripMap() {
           🚗 Drive to Next Destination
         </button>
       </div>
+
+      {showMap && (
+        <div id="road-trip-map" style={{ marginBottom: 28 }}>
+          <h2 style={{ fontSize: 28, marginBottom: 10 }}>Road Trip Overview Map</h2>
+
+          {mapLoading ? (
+            <p>지도 준비 중...</p>
+          ) : mapPoints.length === 0 ? (
+            <p>표시할 장소가 없습니다.</p>
+          ) : (
+            <div
+              style={{
+                border: "1px solid #d9d9d9",
+                borderRadius: 12,
+                overflow: "hidden",
+              }}
+            >
+              <MapContainer
+                center={[39, -98]}
+                zoom={4}
+                scrollWheelZoom={true}
+                style={{ width: "100%", height: 520 }}
+              >
+                <TileLayer
+                  attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                  url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                />
+
+                <MapAutoFit points={mapPoints} />
+
+                <Polyline positions={polylinePositions} pathOptions={{ color: "#0d6efd", weight: 4 }} />
+
+                {mapPoints.map((point) => (
+                  <CircleMarker
+                    key={`${point.order}-${point.label}-${point.date}`}
+                    center={[point.lat, point.lng]}
+                    radius={8}
+                    pathOptions={{
+                      color: "#ffffff",
+                      weight: 2,
+                      fillColor: "#d63384",
+                      fillOpacity: 0.95,
+                    }}
+                  >
+                    <Tooltip permanent direction="top" offset={[0, -10]}>
+                      {point.order}
+                    </Tooltip>
+                    <Popup>
+                      <div style={{ minWidth: 160 }}>
+                        <div style={{ fontWeight: 700 }}>{point.order}. {point.label}</div>
+                        <div style={{ marginTop: 4 }}>Date: {point.date}</div>
+                      </div>
+                    </Popup>
+                  </CircleMarker>
+                ))}
+              </MapContainer>
+            </div>
+          )}
+        </div>
+      )}
 
       <div style={{ marginBottom: 12 }}>
         <input
@@ -581,137 +750,135 @@ function openTripMap() {
       ) : entries.length === 0 ? (
         <p>아직 저장된 기록이 없습니다.</p>
       ) : (
-        [...entries]
-          .sort((a, b) => String(a.date).localeCompare(String(b.date)))
-          .map((entry) => (
-            <div
-              key={entry.id}
-              style={{
-                border: "1px solid #d9d9d9",
-                borderRadius: 12,
-                padding: 14,
-                marginBottom: 16,
-                background: "#ffffff",
-              }}
-            >
-              <div>
-                <strong>Trip:</strong> {entry.trip}
-              </div>
-              <div>
-                <strong>Date:</strong> {entry.date}
-              </div>
-              <div>
-                <strong>Location:</strong>{" "}
-                {entry.location ? (
-                  <a
-                    href={mapLink(entry.location)}
-                    target="_blank"
-                    rel="noreferrer"
-                    style={{
-                      color: "#0056cc",
-                      textDecoration: "underline",
-                      fontWeight: 700,
-                    }}
-                  >
-                    {entry.location}
-                  </a>
-                ) : (
-                  ""
-                )}
-              </div>
-              <div>
-                <strong>Campground:</strong>{" "}
-                {entry.campground ? (
-                  <a
-                    href={mapLink(
-                      `${entry.campground}${entry.location ? ", " + entry.location : ""}`
-                    )}
-                    target="_blank"
-                    rel="noreferrer"
-                    style={{
-                      color: "#0056cc",
-                      textDecoration: "underline",
-                      fontWeight: 700,
-                    }}
-                  >
-                    {entry.campground}
-                  </a>
-                ) : (
-                  ""
-                )}
-              </div>
-              <div>
-                <strong>Site:</strong> {entry.site}
-              </div>
-              <div>
-                <strong>Water:</strong> {entry.water}
-              </div>
-              <div>
-                <strong>Bathroom:</strong> {entry.bathroom}
-              </div>
-              <div>
-                <strong>Noise:</strong> {entry.noise}
-              </div>
-              <div>
-                <strong>Rating:</strong> {entry.rating}
-              </div>
-
-              {entry.notes && (
-                <div style={{ marginTop: 10, whiteSpace: "pre-wrap" }}>
-                  {entry.notes}
-                </div>
-              )}
-
-              {entry.photo_urls && entry.photo_urls.length > 0 && (
-                <div
+        sortedEntries.map((entry) => (
+          <div
+            key={entry.id}
+            style={{
+              border: "1px solid #d9d9d9",
+              borderRadius: 12,
+              padding: 14,
+              marginBottom: 16,
+              background: "#ffffff",
+            }}
+          >
+            <div>
+              <strong>Trip:</strong> {entry.trip}
+            </div>
+            <div>
+              <strong>Date:</strong> {entry.date}
+            </div>
+            <div>
+              <strong>Location:</strong>{" "}
+              {entry.location ? (
+                <a
+                  href={mapLink(entry.location)}
+                  target="_blank"
+                  rel="noreferrer"
                   style={{
-                    marginTop: 12,
-                    display: "flex",
-                    gap: 10,
-                    flexWrap: "wrap",
+                    color: "#0056cc",
+                    textDecoration: "underline",
+                    fontWeight: 700,
                   }}
                 >
-                  {entry.photo_urls.map((url, i) => (
-                    <a
-                      key={url + i}
-                      href={url}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      <img
-                        src={url}
-                        alt="travel"
-                        style={{
-                          width: 120,
-                          height: 90,
-                          objectFit: "cover",
-                          borderRadius: 8,
-                          border: "1px solid #ddd",
-                        }}
-                      />
-                    </a>
-                  ))}
-                </div>
+                  {entry.location}
+                </a>
+              ) : (
+                ""
               )}
-
-              <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
-                <button
-                  type="button"
-                  onClick={() => startEdit(entry)}
-                  style={smallButtonStyle}
-                >
-                  Edit
-                </button>
-                <button
-                  type="button"
-                  onClick={() => deleteEntry(entry.id)}
-                  style={smallDangerButtonStyle}
-                >
-                  Delete
-                </button>
-              </div>
             </div>
-          ))
+            <div>
+              <strong>Campground:</strong>{" "}
+              {entry.campground ? (
+                <a
+                  href={mapLink(
+                    `${entry.campground}${entry.location ? ", " + entry.location : ""}`
+                  )}
+                  target="_blank"
+                  rel="noreferrer"
+                  style={{
+                    color: "#0056cc",
+                    textDecoration: "underline",
+                    fontWeight: 700,
+                  }}
+                >
+                  {entry.campground}
+                </a>
+              ) : (
+                ""
+              )}
+            </div>
+            <div>
+              <strong>Site:</strong> {entry.site}
+            </div>
+            <div>
+              <strong>Water:</strong> {entry.water}
+            </div>
+            <div>
+              <strong>Bathroom:</strong> {entry.bathroom}
+            </div>
+            <div>
+              <strong>Noise:</strong> {entry.noise}
+            </div>
+            <div>
+              <strong>Rating:</strong> {entry.rating}
+            </div>
+
+            {entry.notes && (
+              <div style={{ marginTop: 10, whiteSpace: "pre-wrap" }}>
+                {entry.notes}
+              </div>
+            )}
+
+            {entry.photo_urls && entry.photo_urls.length > 0 && (
+              <div
+                style={{
+                  marginTop: 12,
+                  display: "flex",
+                  gap: 10,
+                  flexWrap: "wrap",
+                }}
+              >
+                {entry.photo_urls.map((url, i) => (
+                  <a
+                    key={url + i}
+                    href={url}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    <img
+                      src={url}
+                      alt="travel"
+                      style={{
+                        width: 120,
+                        height: 90,
+                        objectFit: "cover",
+                        borderRadius: 8,
+                        border: "1px solid #ddd",
+                      }}
+                    />
+                  </a>
+                ))}
+              </div>
+            )}
+
+            <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
+              <button
+                type="button"
+                onClick={() => startEdit(entry)}
+                style={smallButtonStyle}
+              >
+                Edit
+              </button>
+              <button
+                type="button"
+                onClick={() => deleteEntry(entry.id)}
+                style={smallDangerButtonStyle}
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        ))
       )}
     </div>
   );
