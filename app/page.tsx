@@ -248,36 +248,22 @@ export default function Page() {
     setExistingPhotoUrls(copy);
   }
 
-  function openTripMap() {
-    if (!entries || entries.length < 2) return;
+function openTripMap() {
+  if (!entries || entries.length < 2) return;
 
-    const locations = [...entries]
-      .sort((a, b) => String(a.date).localeCompare(String(b.date)))
-      .map((e) => e.location)
-      .filter((l): l is string => !!l && l.trim() !== "");
+  const locations = [...entries]
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)))
+    .map((e) => e.location)
+    .filter((l): l is string => !!l && l.trim() !== "");
 
-    if (locations.length < 2) return;
+  if (locations.length < 2) return;
 
-    const origin = locations[0];
-    const destination = locations[locations.length - 1];
-    const waypoints = locations.slice(1, -1);
+  const url =
+    "https://www.google.com/maps/dir/" +
+    locations.map((l) => encodeURIComponent(l)).join("/");
 
-    let url =
-      "https://www.google.com/maps/dir/?api=1" +
-      "&origin=" +
-      encodeURIComponent(origin) +
-      "&destination=" +
-      encodeURIComponent(destination) +
-      "&travelmode=driving";
-
-    if (waypoints.length > 0) {
-      url +=
-        "&waypoints=" +
-        waypoints.map((w) => encodeURIComponent(w)).join("|");
-    }
-
-    window.open(url, "_blank");
-  }
+  window.open(url, "_blank");
+}
 
   function openNextDrive() {
     if (!entries || entries.length < 2) return;
