@@ -251,8 +251,7 @@ export default function Page() {
 function openTripMap() {
   if (!entries || entries.length < 2) return;
 
-  const locations = [...entries]
-    .sort((a, b) => String(a.date).localeCompare(String(b.date)))
+  const locations = entries
     .map((e) => e.location)
     .filter((l): l is string => !!l && l.trim() !== "");
 
