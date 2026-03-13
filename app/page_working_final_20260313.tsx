@@ -65,10 +65,7 @@ function emptyForm(): FormState {
 }
 
 const TABLE = "travel_entries";
-const BUCKET = "travel-photos";
-const UPLOAD_TIMEOUT_MS = 20000;
-const MAX_FILE_MB = 8;
-const MAX_FILE_BYTES = MAX_FILE_MB * 1024 * 1024;
+const BUCKET = "roadtrip-photos";
 
 const MAP1: Stop[] = [
   { label: "Jackson, Mississippi", query: "Jackson, Mississippi" },
@@ -164,9 +161,8 @@ export default function Page() {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("새 기록 입력 모드");
 
-  const photoPickerRef = useRef<HTMLInputElement | null>(null);
-  const cameraInputRef = useRef<HTMLInputElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const cameraInputRef = useRef<HTMLInputElement | null>(null);
 
   const map1Url = useMemo(() => buildGoogleMapsDirections(MAP1), []);
   const map2Url = useMemo(() => buildGoogleMapsDirections(MAP2), []);
@@ -251,81 +247,15 @@ export default function Page() {
     setForm((prev) => ({ ...prev, [key]: value }));
   }
 
-  function addAcceptedFiles(files: File[]) {
-    if (!files.length) return;
-
-    const accepted: File[] = [];
-    const rejected: string[] = [];
-
-    for (const file of files) {
-      if (file.size > MAX_FILE_BYTES) {
-        rejected.push(`${file.name} (${MAX_FILE_MB}MB 초과)`);
-        continue;
-      }
-      accepted.push(file);
-    }
-
-    if (accepted.length) {
-      setSelectedFiles((prev) => [...prev, ...accepted]);
-      setMsg(`${accepted.length}개 파일 선택됨`);
-    }
-
-    if (rejected.length) {
-      setMsg(`제외된 파일: ${rejected.join(", ")}`);
-    }
-  }
-
-  function onChoosePhotos(e: ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(e.target.files ?? []);
-    addAcceptedFiles(files);
-  }
-
-  function onTakePhoto(e: ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(e.target.files ?? []);
-    addAcceptedFiles(files);
-  }
-
   function onChooseFiles(e: ChangeEvent<HTMLInputElement>) {
     const files = Array.from(e.target.files ?? []);
-    addAcceptedFiles(files);
+    if (!files.length) return;
+    setSelectedFiles((prev) => [...prev, ...files]);
+    setMsg(`${files.length}개 파일 선택됨`);
   }
 
   function removeSelectedFile(index: number) {
     setSelectedFiles((prev) => prev.filter((_, i) => i !== index));
-  }
-
-  async function uploadSingleFile(uid: string, file: File) {
-    const original = file.name || "upload";
-    const safeName = original.replace(/[^\w.\-]+/g, "_");
-    const dot = safeName.lastIndexOf(".");
-    const ext = dot >= 0 ? safeName.slice(dot) : "";
-    const path = `${uid}/${Date.now()}-${Math.random()
-      .toString(36)
-      .slice(2)}${ext}`;
-
-    const uploadPromise = supabase.storage.from(BUCKET).upload(path, file, {
-      cacheControl: "3600",
-      upsert: false,
-      contentType: file.type || undefined,
-    });
-
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => {
-        reject(new Error(`업로드 시간 초과: ${file.name}`));
-      }, UPLOAD_TIMEOUT_MS);
-    });
-
-    const result = (await Promise.race([
-      uploadPromise,
-      timeoutPromise,
-    ])) as Awaited<typeof uploadPromise>;
-
-    if (result.error) {
-      throw new Error(`업로드 실패 (${file.name}): ${result.error.message}`);
-    }
-
-    const { data } = supabase.storage.from(BUCKET).getPublicUrl(path);
-    return data.publicUrl;
   }
 
   async function uploadFiles(uid: string) {
@@ -333,11 +263,28 @@ export default function Page() {
 
     const uploadedUrls: string[] = [];
 
-    for (let i = 0; i < selectedFiles.length; i++) {
-      const file = selectedFiles[i];
-      setMsg(`업로드 중 (${i + 1}/${selectedFiles.length}): ${file.name}`);
-      const publicUrl = await uploadSingleFile(uid, file);
-      uploadedUrls.push(publicUrl);
+    for (const file of selectedFiles) {
+      setMsg(`업로드 중: ${file.name}`);
+
+      const original = file.name || "upload";
+      const safeName = original.replace(/[^\w.\-]+/g, "_");
+      const dot = safeName.lastIndexOf(".");
+      const ext = dot >= 0 ? safeName.slice(dot) : "";
+      const path = `${uid}/${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2)}${ext}`;
+
+      const { error: uploadError } = await supabase.storage
+        .from(BUCKET)
+        .upload(path, file, {
+          cacheControl: "3600",
+          upsert: false,
+        });
+
+      if (uploadError) throw new Error(uploadError.message);
+
+      const { data } = supabase.storage.from(BUCKET).getPublicUrl(path);
+      uploadedUrls.push(data.publicUrl);
     }
 
     return uploadedUrls;
@@ -400,18 +347,16 @@ export default function Page() {
     }
 
     setBusy(true);
+    setMsg(editingId ? "수정 저장 중..." : "저장 중...");
 
     try {
       let uploadedUrls: string[] = [];
 
       if (selectedFiles.length) {
-        setMsg("사진 업로드 시작...");
         uploadedUrls = await uploadFiles(userId);
       }
 
       if (editingId) {
-        setMsg("수정 저장 중...");
-
         const current = entries.find((e) => e.id === editingId);
         const mergedUrls = [...(current?.photo_urls ?? []), ...uploadedUrls];
 
@@ -438,8 +383,6 @@ export default function Page() {
 
         setMsg("수정 저장 완료");
       } else {
-        setMsg("기록 저장 중...");
-
         const payload = {
           user_id: userId,
           trip: form.trip || null,
@@ -465,16 +408,14 @@ export default function Page() {
       setEditingId(null);
       setForm(emptyForm());
       setSelectedFiles([]);
-
-      if (photoPickerRef.current) photoPickerRef.current.value = "";
-      if (cameraInputRef.current) cameraInputRef.current.value = "";
       if (fileInputRef.current) fileInputRef.current.value = "";
+      if (cameraInputRef.current) cameraInputRef.current.value = "";
 
-      setBusy(false);
       await loadEntries(userId);
     } catch (err: any) {
-      setBusy(false);
       setMsg(`저장 오류: ${err?.message ?? "알 수 없는 오류"}`);
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -493,11 +434,8 @@ export default function Page() {
       notes: row.notes ?? "",
     });
     setSelectedFiles([]);
-
-    if (photoPickerRef.current) photoPickerRef.current.value = "";
-    if (cameraInputRef.current) cameraInputRef.current.value = "";
     if (fileInputRef.current) fileInputRef.current.value = "";
-
+    if (cameraInputRef.current) cameraInputRef.current.value = "";
     setMsg("수정 모드");
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -517,10 +455,8 @@ export default function Page() {
       setEditingId(null);
       setForm(emptyForm());
       setSelectedFiles([]);
-
-      if (photoPickerRef.current) photoPickerRef.current.value = "";
-      if (cameraInputRef.current) cameraInputRef.current.value = "";
       if (fileInputRef.current) fileInputRef.current.value = "";
+      if (cameraInputRef.current) cameraInputRef.current.value = "";
     }
 
     setMsg("삭제 완료");
@@ -531,11 +467,8 @@ export default function Page() {
     setEditingId(null);
     setForm(emptyForm());
     setSelectedFiles([]);
-
-    if (photoPickerRef.current) photoPickerRef.current.value = "";
-    if (cameraInputRef.current) cameraInputRef.current.value = "";
     if (fileInputRef.current) fileInputRef.current.value = "";
-
+    if (cameraInputRef.current) cameraInputRef.current.value = "";
     setMsg("새 기록 입력 모드");
   }
 
@@ -755,41 +688,9 @@ export default function Page() {
           </div>
 
           <div style={{ marginTop: 16 }}>
-            <div style={styles.label}>Attachments</div>
+            <div style={styles.label}>Photos / Files</div>
 
             <div style={styles.uploadRow}>
-              <input
-                ref={photoPickerRef}
-                type="file"
-                accept="image/*"
-                multiple
-                onChange={onChoosePhotos}
-                style={{ display: "none" }}
-              />
-              <button
-                type="button"
-                style={styles.fileBtn}
-                onClick={() => photoPickerRef.current?.click()}
-              >
-                🖼 Choose Photos
-              </button>
-
-              <input
-                ref={cameraInputRef}
-                type="file"
-                accept="image/*"
-                capture="environment"
-                onChange={onTakePhoto}
-                style={{ display: "none" }}
-              />
-              <button
-                type="button"
-                style={styles.fileBtn}
-                onClick={() => cameraInputRef.current?.click()}
-              >
-                📷 Take Photo
-              </button>
-
               <input
                 ref={fileInputRef}
                 type="file"
@@ -803,6 +704,23 @@ export default function Page() {
                 onClick={() => fileInputRef.current?.click()}
               >
                 📁 Choose Files
+              </button>
+
+              <input
+                ref={cameraInputRef}
+                type="file"
+                accept="image/*"
+                capture="environment"
+                multiple
+                onChange={onChooseFiles}
+                style={{ display: "none" }}
+              />
+              <button
+                type="button"
+                style={styles.fileBtn}
+                onClick={() => cameraInputRef.current?.click()}
+              >
+                📷 Take Photo
               </button>
             </div>
 
