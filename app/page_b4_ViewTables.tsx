@@ -9,15 +9,12 @@ import {
   useState,
 } from "react";
 import { supabase } from "@/lib/supabase";
-import dynamic from "next/dynamic";
-const TripMap = dynamic(() => import("./components/TripMap"), { ssr: false });
+
 /** =========================
  *  꼭 확인할 2줄
  *  ========================= */
 const TABLE = "travel_entries";
 const PHOTO_BUCKET = "travel-photos";
-const DEFAULT_TRIP = "Spring 2026 West Road Trip";
-const TRIP_STORAGE_KEY = "travel_v1_current_trip";
 
 /** =========================
  *  Types
@@ -40,6 +37,7 @@ type EntryRow = {
 };
 
 type FormState = {
+  trip: string;
   date: string;
   location: string;
   campground: string;
@@ -58,6 +56,61 @@ type SessionLike = {
   } | null;
 } | null;
 
+type Stop = {
+  label: string;
+  query: string;
+};
+
+const MAP1: Stop[] = [
+  { label: "Jackson, Mississippi", query: "Jackson, Mississippi" },
+  { label: "Dallas, Texas", query: "Dallas, Texas" },
+  { label: "Carlsbad, New Mexico", query: "Carlsbad, New Mexico 88220" },
+  { label: "Las Cruces, New Mexico", query: "Las Cruces, New Mexico" },
+  { label: "Tucson, Arizona", query: "Tucson, Arizona" },
+  {
+    label: "Joshua Tree National Park",
+    query: "Joshua Tree National Park, California",
+  },
+  { label: "Irvine, California", query: "Irvine, California" },
+  { label: "Santa Monica, California", query: "Santa Monica, California" },
+];
+
+const MAP2: Stop[] = [
+  { label: "Santa Monica, California", query: "Santa Monica, California" },
+  { label: "Pasadena, California", query: "Pasadena, California" },
+  {
+    label: "Potwisha Campground, Sequoia",
+    query:
+      "Potwisha Campground, Sequoia National Park, Generals Highway, Three Rivers, CA",
+  },
+  {
+    label: "Furnace Creek Campground, Death Valley",
+    query: "Furnace Creek Campground, Death Valley National Park, California",
+  },
+  { label: "Las Vegas, Nevada", query: "Las Vegas, Nevada" },
+  { label: "Zion National Park", query: "Zion National Park, Utah" },
+  {
+    label: "Bryce Canyon National Park",
+    query: "Bryce Canyon National Park, Utah",
+  },
+  { label: "Moab, Utah", query: "Moab, Utah 84532" },
+  { label: "Mexican Hat, Utah", query: "Mexican Hat, Utah 84531" },
+];
+
+const MAP3: Stop[] = [
+  { label: "Mexican Hat, Utah", query: "Mexican Hat, Utah 84531" },
+  { label: "Page, Arizona", query: "Page, Arizona" },
+  { label: "Sedona, Arizona", query: "Sedona, Arizona" },
+  { label: "Holbrook, Arizona", query: "Holbrook, Arizona" },
+  { label: "Albuquerque, New Mexico", query: "Albuquerque, New Mexico" },
+  { label: "Amarillo, Texas", query: "Amarillo, Texas" },
+  { label: "Oklahoma City, Oklahoma", query: "Oklahoma City, Oklahoma" },
+  { label: "Little Rock, Arkansas", query: "Little Rock, Arkansas" },
+  { label: "Memphis, Tennessee", query: "Memphis, Tennessee" },
+  { label: "Nashville, Tennessee", query: "Nashville, Tennessee" },
+  { label: "Home", query: "3272 Norwood Ct NW, Duluth, GA 30096" },
+];
+
 /** =========================
  *  Helpers
  *  ========================= */
@@ -70,6 +123,7 @@ function localYMD(d = new Date()) {
 
 function emptyForm(): FormState {
   return {
+    trip: "Spring 2026 West Road Trip",
     date: localYMD(),
     location: "",
     campground: "",
@@ -98,14 +152,6 @@ function toNullableNumber(v: string) {
   return Number.isFinite(n) ? n : null;
 }
 
-function makeSlug(name: string) {
-  return name
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/(^-|-$)/g, "");
-}
-
 function makePhotoPath(userId: string, fileName: string) {
   const stamp = Date.now();
   const rand = Math.random().toString(36).slice(2, 8);
@@ -116,6 +162,27 @@ function makePhotoPath(userId: string, fileName: string) {
 function fileToJpgName(name: string) {
   const base = name.replace(/\.[^.]+$/, "");
   return `${base}.jpg`;
+}
+
+function buildFixedMapUrl(stops: Stop[]) {
+  if (stops.length < 2) return "";
+
+  const origin = stops[0].query;
+  const destination = stops[stops.length - 1].query;
+  const waypoints = stops.slice(1, -1).map((s) => s.query);
+
+  const params = new URLSearchParams({
+    api: "1",
+    origin,
+    destination,
+    travelmode: "driving",
+  });
+
+  if (waypoints.length) {
+    params.set("waypoints", waypoints.join("|"));
+  }
+
+  return `https://www.google.com/maps/dir/?${params.toString()}`;
 }
 
 async function compressImage(file: File): Promise<File> {
@@ -227,18 +294,7 @@ async function uploadOnePhoto(
 
   return { path, publicUrl };
 }
-async function getLatLng(address: string) {
-  const res = await fetch(
-    `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}`
-  );
-  const data = await res.json();
-  if (!data || data.length === 0) return null;
 
-  return {
-    lat: parseFloat(data[0].lat),
-    lng: parseFloat(data[0].lon),
-  };
-}
 /** =========================
  *  Component
  *  ========================= */
@@ -249,17 +305,9 @@ export default function TravelPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
 
-  /** share */
-  const [shareUrl, setShareUrl] = useState("");
-  const [sharingLoading, setSharingLoading] = useState(false);
-
   /** data */
   const [rows, setRows] = useState<EntryRow[]>([]);
   const [loadingRows, setLoadingRows] = useState(false);
-const [mapPoints, setMapPoints] = useState<any[]>([]);
-  /** trip */
-  const [currentTrip, setCurrentTrip] = useState(DEFAULT_TRIP);
-  const [showTripList, setShowTripList] = useState(false);
 
   /** form */
   const [form, setForm] = useState<FormState>(emptyForm());
@@ -280,42 +328,10 @@ const [mapPoints, setMapPoints] = useState<any[]>([]);
   const [uploadProgress, setUploadProgress] = useState("");
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
-  /** =========================
-   *  derived: trips
-   *  ========================= */
-  const tripList = useMemo(() => {
-    const set = new Set<string>();
-
-    rows.forEach((row) => {
-      const trip = row.trip?.trim();
-      if (trip) set.add(trip);
-    });
-
-    if (currentTrip.trim()) {
-      set.add(currentTrip.trim());
-    }
-
-    if (DEFAULT_TRIP.trim()) {
-      set.add(DEFAULT_TRIP.trim());
-    }
-
-    return Array.from(set).sort((a, b) => a.localeCompare(b));
-  }, [rows, currentTrip]);
-
-  const filteredRows = useMemo(() => {
-    return rows.filter((row) => (row.trip?.trim() || "") === currentTrip.trim());
-  }, [rows, currentTrip]);
-
-  const currentTripPhotoCount = useMemo(
-    () =>
-      filteredRows.reduce((sum, row) => sum + (row.photo_urls?.length ?? 0), 0),
-    [filteredRows]
-  );
-
-  const totalPhotoCount = useMemo(
-    () => existingPhotoUrls.length + newPhotos.length,
-    [existingPhotoUrls.length, newPhotos.length]
-  );
+  /** map urls */
+  const map1Url = useMemo(() => buildFixedMapUrl(MAP1), []);
+  const map2Url = useMemo(() => buildFixedMapUrl(MAP2), []);
+  const map3Url = useMemo(() => buildFixedMapUrl(MAP3), []);
 
   /** =========================
    *  auth init
@@ -372,26 +388,6 @@ const [mapPoints, setMapPoints] = useState<any[]>([]);
   }, []);
 
   /** =========================
-   *  trip restore
-   *  ========================= */
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const savedTrip = localStorage.getItem(TRIP_STORAGE_KEY)?.trim();
-    if (savedTrip) {
-      setCurrentTrip(savedTrip);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    localStorage.setItem(TRIP_STORAGE_KEY, currentTrip);
-  }, [currentTrip]);
-
-  useEffect(() => {
-    setShareUrl("");
-  }, [currentTrip]);
-
-  /** =========================
    *  rows load
    *  ========================= */
   async function loadRows() {
@@ -406,8 +402,8 @@ const [mapPoints, setMapPoints] = useState<any[]>([]);
         .from(TABLE)
         .select("*")
         .eq("user_id", userId)
-        .order("date", { ascending: false })
-        .order("created_at", { ascending: false });
+        .order("date", { ascending: true })
+        .order("created_at", { ascending: true });
 
       if (error) throw error;
       setRows((data || []) as EntryRow[]);
@@ -438,57 +434,6 @@ const [mapPoints, setMapPoints] = useState<any[]>([]);
     }
   }, [session?.user?.id]);
 
-  /** =========================
-   *  keep currentTrip valid
-   *  ========================= */
-  useEffect(() => {
-    if (!tripList.length) return;
-
-    const exists = tripList.includes(currentTrip);
-    if (!exists) {
-      setCurrentTrip(tripList[0]);
-    }
-  }, [tripList, currentTrip]);
-
-  useEffect(() => {
-  let cancelled = false;
-
-  async function loadPoints() {
-    const sortedRows = [...filteredRows].sort((a, b) => {
-      const da = `${a.date || ""} ${a.created_at || ""}`;
-      const db = `${b.date || ""} ${b.created_at || ""}`;
-      return da.localeCompare(db);
-    });
-
-    const results: { lat: number; lng: number; label: string }[] = [];
-
-    for (const row of sortedRows) {
-      if (!row.location) continue;
-
-      const coords = await getLatLng(row.location);
-      if (coords) {
-        results.push({
-          ...coords,
-          label: row.location,
-        });
-      }
-    }
-
-    if (!cancelled) {
-      setMapPoints(results);
-    }
-  }
-
-  if (filteredRows.length > 0) {
-    loadPoints();
-  } else {
-    setMapPoints([]);
-  }
-
-  return () => {
-    cancelled = true;
-  };
-}, [filteredRows]);
   /** =========================
    *  preview urls for pending files
    *  ========================= */
@@ -521,11 +466,8 @@ const [mapPoints, setMapPoints] = useState<any[]>([]);
 
   function startEdit(row: EntryRow) {
     setEditingId(row.id);
-
-    const rowTrip = row.trip?.trim() || currentTrip;
-    setCurrentTrip(rowTrip);
-
     setForm({
+      trip: row.trip || "",
       date: row.date || localYMD(),
       location: row.location || "",
       campground: row.campground || "",
@@ -541,260 +483,6 @@ const [mapPoints, setMapPoints] = useState<any[]>([]);
     setUploadProgress("");
     setMessage("");
     window.scrollTo({ top: 0, behavior: "smooth" });
-  }
-
-  /** =========================
-   *  trip handlers
-   *  ========================= */
-  async function handleCreateTrip() {
-    const raw = window.prompt("새 trip 이름을 입력하세요.", "");
-    const name = raw?.trim();
-
-    if (!name) return;
-
-    if (tripList.includes(name)) {
-      setCurrentTrip(name);
-      setShowTripList(false);
-      setMessage(`이미 있는 trip입니다. 현재 trip을 "${name}"(으)로 바꿨습니다.`);
-      return;
-    }
-
-    try {
-      const { error } = await supabase.from("trips").insert({
-        name,
-        is_public: false,
-        share_slug: null,
-      });
-
-      if (error) throw error;
-
-      setCurrentTrip(name);
-      setEditingId(null);
-      setForm(emptyForm());
-      setExistingPhotoUrls([]);
-      setNewPhotos([]);
-      setShowTripList(false);
-      setMessage(`새 trip 준비 완료: ${name}`);
-    } catch (err: any) {
-      console.error(err);
-      setMessage(`새 trip 생성 오류: ${err?.message || "알 수 없는 오류"}`);
-    }
-  }
-
-async function handleShareTrip() {
-  if (!currentTrip || !session?.user?.id) return;
-
-  setSharingLoading(true);
-
-  try {
-    let { data: tripRow, error } = await supabase
-      .from("trips")
-      .select("id, name, share_slug, is_public")
-      .eq("user_id", session.user.id)
-      .eq("name", currentTrip)
-      .maybeSingle();
-
-    if (error) throw error;
-
-    // trips 테이블에 없으면 자동 생성
-    if (!tripRow) {
-      const { data: inserted, error: insertError } = await supabase
-        .from("trips")
-        .insert({
-          user_id: session.user.id,
-          name: currentTrip,
-          is_public: false,
-          share_slug: null,
-        })
-        .select("id, name, share_slug, is_public")
-        .single();
-
-      if (insertError) throw insertError;
-      tripRow = inserted;
-    }
-
-    let slug = tripRow.share_slug;
-
-    if (!slug) {
-      slug = makeSlug(tripRow.name);
-
-      const { data: existing, error: existingError } = await supabase
-        .from("trips")
-        .select("id")
-        .eq("share_slug", slug);
-
-      if (existingError) throw existingError;
-
-      if (existing && existing.length > 0) {
-        slug = `${slug}-${Math.floor(Math.random() * 1000)}`;
-      }
-
-      const { error: updateError } = await supabase
-        .from("trips")
-        .update({
-          share_slug: slug,
-          is_public: true,
-        })
-        .eq("id", tripRow.id);
-
-      if (updateError) throw updateError;
-    } else {
-      const { error: updateError } = await supabase
-        .from("trips")
-        .update({
-          is_public: true,
-        })
-        .eq("id", tripRow.id);
-
-      if (updateError) throw updateError;
-    }
-
-    const url = `${window.location.origin}/share/${slug}`;
-    setShareUrl(url);
-    setMessage("공유 링크 준비 완료");
-  } catch (err: any) {
-    console.error(err);
-    setMessage(`Share 생성 오류: ${err?.message || "알 수 없는 오류"}`);
-  } finally {
-    setSharingLoading(false);
-  }
-}
-
-  async function handleCopyLink() {
-    if (!shareUrl) return;
-
-    try {
-      await navigator.clipboard.writeText(shareUrl);
-      setMessage("링크가 복사되었습니다!");
-    } catch (err: any) {
-      console.error(err);
-      setMessage(`복사 오류: ${err?.message || "알 수 없는 오류"}`);
-    }
-  }
-
-  async function handleStopSharing() {
-    if (!currentTrip) return;
-
-    try {
-      const { data: tripRow, error } = await supabase
-        .from("trips")
-        .select("id")
-        .eq("name", currentTrip)
-        .single();
-
-      if (error || !tripRow) {
-        setMessage("Trip 정보를 찾을 수 없습니다.");
-        return;
-      }
-
-      const { error: updateError } = await supabase
-        .from("trips")
-        .update({ is_public: false })
-        .eq("id", tripRow.id);
-
-      if (updateError) throw updateError;
-
-      setShareUrl("");
-      setMessage("공유 중지 완료");
-    } catch (err: any) {
-      console.error(err);
-      setMessage(`공유 중지 오류: ${err?.message || "알 수 없는 오류"}`);
-    }
-  }
-
-  async function handleRenameTrip() {
-    const oldTrip = currentTrip.trim();
-    if (!oldTrip) return;
-
-    const raw = window.prompt("새 trip 이름", oldTrip);
-    const newTrip = raw?.trim();
-
-    if (!newTrip || newTrip === oldTrip) return;
-
-    const userId = session?.user?.id;
-    if (!userId) return;
-
-    try {
-      const { error: entryError } = await supabase
-        .from(TABLE)
-        .update({ trip: newTrip })
-        .eq("user_id", userId)
-        .eq("trip", oldTrip);
-
-      if (entryError) throw entryError;
-
-      const { error: tripError } = await supabase
-        .from("trips")
-        .update({ name: newTrip })
-        .eq("name", oldTrip);
-
-      if (tripError) throw tripError;
-
-      setRows((prev) =>
-        prev.map((row) =>
-          (row.trip?.trim() || "") === oldTrip ? { ...row, trip: newTrip } : row
-        )
-      );
-      setCurrentTrip(newTrip);
-      setMessage("Trip 이름 변경 완료");
-    } catch (err: any) {
-      console.error(err);
-      setMessage(`Trip 이름 변경 오류: ${err?.message || "알 수 없는 오류"}`);
-    }
-  }
-
-  async function handleDeleteTrip() {
-    const tripToDelete = currentTrip.trim();
-    const userId = session?.user?.id;
-
-    if (!tripToDelete || !userId) return;
-
-    const targetCount = rows.filter(
-      (row) => (row.trip?.trim() || "") === tripToDelete
-    ).length;
-
-    const ok = window.confirm(
-      `"${tripToDelete}" trip의 기록 ${targetCount}개를 모두 삭제할까요?`
-    );
-    if (!ok) return;
-
-    try {
-      const { error: entryError } = await supabase
-        .from(TABLE)
-        .delete()
-        .eq("user_id", userId)
-        .eq("trip", tripToDelete);
-
-      if (entryError) throw entryError;
-
-      const { error: tripError } = await supabase
-        .from("trips")
-        .delete()
-        .eq("name", tripToDelete);
-
-      if (tripError) throw tripError;
-
-      const remainingRows = rows.filter(
-        (row) => (row.trip?.trim() || "") !== tripToDelete
-      );
-      setRows(remainingRows);
-
-      const remainingTrips = Array.from(
-        new Set(
-          remainingRows
-            .map((row) => row.trip?.trim())
-            .filter((trip): trip is string => Boolean(trip))
-        )
-      ).sort((a, b) => a.localeCompare(b));
-
-      setCurrentTrip(remainingTrips[0] || DEFAULT_TRIP);
-      resetAll();
-      setShowTripList(false);
-      setMessage("Trip 삭제 완료");
-    } catch (err: any) {
-      console.error(err);
-      setMessage(`Trip 삭제 오류: ${err?.message || "알 수 없는 오류"}`);
-    }
   }
 
   /** =========================
@@ -905,11 +593,6 @@ async function handleShareTrip() {
       return;
     }
 
-    if (!notEmpty(currentTrip)) {
-      setMessage("먼저 trip을 선택하거나 새로 만드세요.");
-      return;
-    }
-
     if (!notEmpty(form.date)) {
       setMessage("날짜를 입력하세요.");
       return;
@@ -933,7 +616,7 @@ async function handleShareTrip() {
 
       const payload = {
         user_id: userId,
-        trip: currentTrip.trim(),
+        trip: toNullable(form.trip),
         date: form.date,
         location: toNullable(form.location),
         campground: toNullable(form.campground),
@@ -990,6 +673,14 @@ async function handleShareTrip() {
       setMessage(`삭제 오류: ${err?.message || "알 수 없는 오류"}`);
     }
   }
+
+  /** =========================
+   *  derived
+   *  ========================= */
+  const totalPhotoCount = useMemo(
+    () => existingPhotoUrls.length + newPhotos.length,
+    [existingPhotoUrls.length, newPhotos.length]
+  );
 
   /** =========================
    *  styles
@@ -1159,10 +850,6 @@ async function handleShareTrip() {
   /** =========================
    *  render - main
    *  ========================= */
-  const mapCenter: [number, number] =
-  mapPoints.length > 0
-    ? [Number(mapPoints[0].lat), Number(mapPoints[0].lng)]
-    : [33.749, -84.388];
   return (
     <div style={page}>
       <div style={card}>
@@ -1210,8 +897,7 @@ async function handleShareTrip() {
               color:
                 message.includes("완료") ||
                 message.includes("추가 완료") ||
-                message.includes("로그인되었습니다.") ||
-                message.includes("준비 완료")
+                message.includes("로그인되었습니다.")
                   ? "#065f46"
                   : "#b91c1c",
             }}
@@ -1228,130 +914,46 @@ async function handleShareTrip() {
       </div>
 
       <div style={card}>
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            gap: 10,
-            alignItems: "flex-start",
-            flexWrap: "wrap",
-          }}
-        >
-          <div>
-            <h3 style={{ marginTop: 0, marginBottom: 8 }}>Current Trip</h3>
-            <div style={{ fontSize: 18, fontWeight: 700 }}>{currentTrip}</div>
-            <div style={{ color: "#6b7280", fontSize: 13, marginTop: 6 }}>
-              Entries: {filteredRows.length} · Photos: {currentTripPhotoCount}
-            </div>
+        <h3 style={{ marginTop: 0, marginBottom: 12 }}>Road Trip 기록</h3>
 
-            <div style={{ marginTop: 10 }}>
-              <button
-                type="button"
-                style={btn}
-                onClick={handleShareTrip}
-                disabled={sharingLoading}
-              >
-                {sharingLoading ? "Sharing..." : "Share Trip"}
-              </button>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button
+            type="button"
+            style={btn}
+            onClick={() => window.open(map1Url, "_blank")}
+          >
+            🐫 Road Trip Map 1
+          </button>
 
-              {shareUrl && (
-                <>
-                  <div style={{ marginTop: 8, fontSize: 14, wordBreak: "break-all" }}>
-                    {shareUrl}
-                  </div>
+          <button
+            type="button"
+            style={btn}
+            onClick={() => window.open(map2Url, "_blank")}
+          >
+            🐫 Road Trip Map 2
+          </button>
 
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 6 }}>
-                    <button type="button" style={btn} onClick={handleCopyLink}>
-                      Copy Link
-                    </button>
-
-                    <button type="button" style={dangerBtn} onClick={handleStopSharing}>
-                      Stop Sharing
-                    </button>
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
-
-          <div style={{ position: "relative" }}>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <button
-                type="button"
-                style={btn}
-                onClick={() => setShowTripList((prev) => !prev)}
-              >
-                View Trips
-              </button>
-              <button type="button" style={btn} onClick={handleCreateTrip}>
-                New Trip
-              </button>
-              <button type="button" style={btn} onClick={handleRenameTrip}>
-                Rename Trip
-              </button>
-              <button type="button" style={dangerBtn} onClick={handleDeleteTrip}>
-                Delete Trip
-              </button>
-            </div>
-
-            {showTripList && (
-              <div
-                style={{
-                  position: "absolute",
-                  right: 0,
-                  top: "calc(100% + 8px)",
-                  minWidth: 240,
-                  border: "1px solid #e5e7eb",
-                  borderRadius: 12,
-                  padding: 8,
-                  background: "#fff",
-                  boxShadow: "0 8px 24px rgba(0,0,0,0.10)",
-                  zIndex: 10,
-                }}
-              >
-                {!tripList.length ? (
-                  <div style={{ padding: 8, color: "#6b7280", fontSize: 14 }}>
-                    No trips yet
-                  </div>
-                ) : (
-                  tripList.map((trip) => (
-                    <button
-                      key={trip}
-                      type="button"
-                      onClick={() => {
-                        setCurrentTrip(trip);
-                        setShowTripList(false);
-                        resetAll();
-                      }}
-                      style={{
-                        display: "block",
-                        width: "100%",
-                        textAlign: "left",
-                        padding: "10px 12px",
-                        borderRadius: 10,
-                        border: "none",
-                        background: trip === currentTrip ? "#f3f4f6" : "#fff",
-                        fontSize: 14,
-                        fontWeight: trip === currentTrip ? 700 : 500,
-                        cursor: "pointer",
-                      }}
-                    >
-                      {trip}
-                      {trip === currentTrip ? " ✓" : ""}
-                    </button>
-                  ))
-                )}
-              </div>
-            )}
-          </div>
+          <button
+            type="button"
+            style={btn}
+            onClick={() => window.open(map3Url, "_blank")}
+          >
+            🐫 Road Trip Map 3
+          </button>
         </div>
       </div>
 
       <div style={card}>
         <h3 style={{ marginTop: 0 }}>{editingId ? "기록 수정" : "새 기록"}</h3>
 
-        <div style={{ marginBottom: 12, color: "#374151", fontSize: 14 }}>
-          Saving to trip: <span style={{ fontWeight: 700 }}>{currentTrip}</span>
+        <div style={{ marginBottom: 10 }}>
+          <label style={label}>Trip</label>
+          <input
+            style={input}
+            value={form.trip}
+            onChange={(e) => setField("trip", e.target.value)}
+            placeholder="예: Spring 2026 West Trip"
+          />
         </div>
 
         <div style={row2}>
@@ -1616,14 +1218,14 @@ async function handleShareTrip() {
 
       <div style={card}>
         <h3 style={{ marginTop: 0, marginBottom: 12 }}>
-          Recent Entries {loadingRows ? "(불러오는 중...)" : `(${filteredRows.length})`}
+          Saved Entries {loadingRows ? "(불러오는 중...)" : `(${rows.length})`}
         </h3>
 
-        {!filteredRows.length ? (
-          <div style={{ color: "#6b7280" }}>이 trip에는 아직 기록이 없습니다.</div>
+        {!rows.length ? (
+          <div style={{ color: "#6b7280" }}>아직 기록이 없습니다.</div>
         ) : (
           <div style={{ display: "grid", gap: 12 }}>
-            {filteredRows.map((row) => (
+            {rows.map((row) => (
               <div
                 key={row.id}
                 style={{
@@ -1718,18 +1320,14 @@ async function handleShareTrip() {
           </div>
         )}
       </div>
-<div style={card}>
-  <h3 style={{ marginTop: 0, marginBottom: 12 }}>Trip Map</h3>
-  <TripMap mapPoints={mapPoints} />
-</div>
+
       {previewUrl && (
         <div
           onClick={() => setPreviewUrl(null)}
           style={{
             position: "fixed",
             inset: 0,
-            background: "black",
-            opacity: 0.75,
+            background: "rgba(0,0,0,0.75)",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
@@ -1744,7 +1342,7 @@ async function handleShareTrip() {
               maxWidth: "100%",
               maxHeight: "100%",
               borderRadius: 12,
-              boxShadow: "0 0 20px black",
+              boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
             }}
           />
         </div>

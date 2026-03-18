@@ -9,8 +9,7 @@ import {
   useState,
 } from "react";
 import { supabase } from "@/lib/supabase";
-import dynamic from "next/dynamic";
-const TripMap = dynamic(() => import("./components/TripMap"), { ssr: false });
+
 /** =========================
  *  꼭 확인할 2줄
  *  ========================= */
@@ -96,14 +95,6 @@ function toNullableNumber(v: string) {
   if (!t) return null;
   const n = Number(t);
   return Number.isFinite(n) ? n : null;
-}
-
-function makeSlug(name: string) {
-  return name
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/(^-|-$)/g, "");
 }
 
 function makePhotoPath(userId: string, fileName: string) {
@@ -227,18 +218,7 @@ async function uploadOnePhoto(
 
   return { path, publicUrl };
 }
-async function getLatLng(address: string) {
-  const res = await fetch(
-    `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}`
-  );
-  const data = await res.json();
-  if (!data || data.length === 0) return null;
 
-  return {
-    lat: parseFloat(data[0].lat),
-    lng: parseFloat(data[0].lon),
-  };
-}
 /** =========================
  *  Component
  *  ========================= */
@@ -249,14 +229,10 @@ export default function TravelPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
 
-  /** share */
-  const [shareUrl, setShareUrl] = useState("");
-  const [sharingLoading, setSharingLoading] = useState(false);
-
   /** data */
   const [rows, setRows] = useState<EntryRow[]>([]);
   const [loadingRows, setLoadingRows] = useState(false);
-const [mapPoints, setMapPoints] = useState<any[]>([]);
+
   /** trip */
   const [currentTrip, setCurrentTrip] = useState(DEFAULT_TRIP);
   const [showTripList, setShowTripList] = useState(false);
@@ -387,10 +363,6 @@ const [mapPoints, setMapPoints] = useState<any[]>([]);
     localStorage.setItem(TRIP_STORAGE_KEY, currentTrip);
   }, [currentTrip]);
 
-  useEffect(() => {
-    setShareUrl("");
-  }, [currentTrip]);
-
   /** =========================
    *  rows load
    *  ========================= */
@@ -450,45 +422,6 @@ const [mapPoints, setMapPoints] = useState<any[]>([]);
     }
   }, [tripList, currentTrip]);
 
-  useEffect(() => {
-  let cancelled = false;
-
-  async function loadPoints() {
-    const sortedRows = [...filteredRows].sort((a, b) => {
-      const da = `${a.date || ""} ${a.created_at || ""}`;
-      const db = `${b.date || ""} ${b.created_at || ""}`;
-      return da.localeCompare(db);
-    });
-
-    const results: { lat: number; lng: number; label: string }[] = [];
-
-    for (const row of sortedRows) {
-      if (!row.location) continue;
-
-      const coords = await getLatLng(row.location);
-      if (coords) {
-        results.push({
-          ...coords,
-          label: row.location,
-        });
-      }
-    }
-
-    if (!cancelled) {
-      setMapPoints(results);
-    }
-  }
-
-  if (filteredRows.length > 0) {
-    loadPoints();
-  } else {
-    setMapPoints([]);
-  }
-
-  return () => {
-    cancelled = true;
-  };
-}, [filteredRows]);
   /** =========================
    *  preview urls for pending files
    *  ========================= */
@@ -546,7 +479,7 @@ const [mapPoints, setMapPoints] = useState<any[]>([]);
   /** =========================
    *  trip handlers
    *  ========================= */
-  async function handleCreateTrip() {
+  function handleCreateTrip() {
     const raw = window.prompt("새 trip 이름을 입력하세요.", "");
     const name = raw?.trim();
 
@@ -559,147 +492,13 @@ const [mapPoints, setMapPoints] = useState<any[]>([]);
       return;
     }
 
-    try {
-      const { error } = await supabase.from("trips").insert({
-        name,
-        is_public: false,
-        share_slug: null,
-      });
-
-      if (error) throw error;
-
-      setCurrentTrip(name);
-      setEditingId(null);
-      setForm(emptyForm());
-      setExistingPhotoUrls([]);
-      setNewPhotos([]);
-      setShowTripList(false);
-      setMessage(`새 trip 준비 완료: ${name}`);
-    } catch (err: any) {
-      console.error(err);
-      setMessage(`새 trip 생성 오류: ${err?.message || "알 수 없는 오류"}`);
-    }
-  }
-
-async function handleShareTrip() {
-  if (!currentTrip || !session?.user?.id) return;
-
-  setSharingLoading(true);
-
-  try {
-    let { data: tripRow, error } = await supabase
-      .from("trips")
-      .select("id, name, share_slug, is_public")
-      .eq("user_id", session.user.id)
-      .eq("name", currentTrip)
-      .maybeSingle();
-
-    if (error) throw error;
-
-    // trips 테이블에 없으면 자동 생성
-    if (!tripRow) {
-      const { data: inserted, error: insertError } = await supabase
-        .from("trips")
-        .insert({
-          user_id: session.user.id,
-          name: currentTrip,
-          is_public: false,
-          share_slug: null,
-        })
-        .select("id, name, share_slug, is_public")
-        .single();
-
-      if (insertError) throw insertError;
-      tripRow = inserted;
-    }
-
-    let slug = tripRow.share_slug;
-
-    if (!slug) {
-      slug = makeSlug(tripRow.name);
-
-      const { data: existing, error: existingError } = await supabase
-        .from("trips")
-        .select("id")
-        .eq("share_slug", slug);
-
-      if (existingError) throw existingError;
-
-      if (existing && existing.length > 0) {
-        slug = `${slug}-${Math.floor(Math.random() * 1000)}`;
-      }
-
-      const { error: updateError } = await supabase
-        .from("trips")
-        .update({
-          share_slug: slug,
-          is_public: true,
-        })
-        .eq("id", tripRow.id);
-
-      if (updateError) throw updateError;
-    } else {
-      const { error: updateError } = await supabase
-        .from("trips")
-        .update({
-          is_public: true,
-        })
-        .eq("id", tripRow.id);
-
-      if (updateError) throw updateError;
-    }
-
-    const url = `${window.location.origin}/share/${slug}`;
-    setShareUrl(url);
-    setMessage("공유 링크 준비 완료");
-  } catch (err: any) {
-    console.error(err);
-    setMessage(`Share 생성 오류: ${err?.message || "알 수 없는 오류"}`);
-  } finally {
-    setSharingLoading(false);
-  }
-}
-
-  async function handleCopyLink() {
-    if (!shareUrl) return;
-
-    try {
-      await navigator.clipboard.writeText(shareUrl);
-      setMessage("링크가 복사되었습니다!");
-    } catch (err: any) {
-      console.error(err);
-      setMessage(`복사 오류: ${err?.message || "알 수 없는 오류"}`);
-    }
-  }
-
-  async function handleStopSharing() {
-    if (!currentTrip) return;
-
-    try {
-      const { data: tripRow, error } = await supabase
-        .from("trips")
-        .select("id")
-        .eq("name", currentTrip)
-        .single();
-
-      if (error || !tripRow) {
-        setMessage("Trip 정보를 찾을 수 없습니다.");
-        return;
-      }
-
-      const { error: updateError } = await supabase
-        .from("trips")
-        .update({ is_public: false })
-        .eq("id", tripRow.id);
-
-      if (updateError) throw updateError;
-
-      setShareUrl("");
-      setMessage("공유 중지 완료");
-    } catch (err: any) {
-      console.error(err);
-      setMessage(`공유 중지 오류: ${err?.message || "알 수 없는 오류"}`);
-    }
+    setCurrentTrip(name);
+    setEditingId(null);
+    setForm(emptyForm());
+    setExistingPhotoUrls([]);
+    setNewPhotos([]);
+    setShowTripList(false);
+    setMessage(`새 trip 준비 완료: ${name}`);
   }
 
   async function handleRenameTrip() {
@@ -715,20 +514,13 @@ async function handleShareTrip() {
     if (!userId) return;
 
     try {
-      const { error: entryError } = await supabase
+      const { error } = await supabase
         .from(TABLE)
         .update({ trip: newTrip })
         .eq("user_id", userId)
         .eq("trip", oldTrip);
 
-      if (entryError) throw entryError;
-
-      const { error: tripError } = await supabase
-        .from("trips")
-        .update({ name: newTrip })
-        .eq("name", oldTrip);
-
-      if (tripError) throw tripError;
+      if (error) throw error;
 
       setRows((prev) =>
         prev.map((row) =>
@@ -759,20 +551,13 @@ async function handleShareTrip() {
     if (!ok) return;
 
     try {
-      const { error: entryError } = await supabase
+      const { error } = await supabase
         .from(TABLE)
         .delete()
         .eq("user_id", userId)
         .eq("trip", tripToDelete);
 
-      if (entryError) throw entryError;
-
-      const { error: tripError } = await supabase
-        .from("trips")
-        .delete()
-        .eq("name", tripToDelete);
-
-      if (tripError) throw tripError;
+      if (error) throw error;
 
       const remainingRows = rows.filter(
         (row) => (row.trip?.trim() || "") !== tripToDelete
@@ -1159,10 +944,6 @@ async function handleShareTrip() {
   /** =========================
    *  render - main
    *  ========================= */
-  const mapCenter: [number, number] =
-  mapPoints.length > 0
-    ? [Number(mapPoints[0].lat), Number(mapPoints[0].lng)]
-    : [33.749, -84.388];
   return (
     <div style={page}>
       <div style={card}>
@@ -1242,35 +1023,6 @@ async function handleShareTrip() {
             <div style={{ fontSize: 18, fontWeight: 700 }}>{currentTrip}</div>
             <div style={{ color: "#6b7280", fontSize: 13, marginTop: 6 }}>
               Entries: {filteredRows.length} · Photos: {currentTripPhotoCount}
-            </div>
-
-            <div style={{ marginTop: 10 }}>
-              <button
-                type="button"
-                style={btn}
-                onClick={handleShareTrip}
-                disabled={sharingLoading}
-              >
-                {sharingLoading ? "Sharing..." : "Share Trip"}
-              </button>
-
-              {shareUrl && (
-                <>
-                  <div style={{ marginTop: 8, fontSize: 14, wordBreak: "break-all" }}>
-                    {shareUrl}
-                  </div>
-
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 6 }}>
-                    <button type="button" style={btn} onClick={handleCopyLink}>
-                      Copy Link
-                    </button>
-
-                    <button type="button" style={dangerBtn} onClick={handleStopSharing}>
-                      Stop Sharing
-                    </button>
-                  </div>
-                </>
-              )}
             </div>
           </div>
 
@@ -1718,18 +1470,14 @@ async function handleShareTrip() {
           </div>
         )}
       </div>
-<div style={card}>
-  <h3 style={{ marginTop: 0, marginBottom: 12 }}>Trip Map</h3>
-  <TripMap mapPoints={mapPoints} />
-</div>
+
       {previewUrl && (
         <div
           onClick={() => setPreviewUrl(null)}
           style={{
             position: "fixed",
             inset: 0,
-            background: "black",
-            opacity: 0.75,
+            background: "rgba(0,0,0,0.75)",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
@@ -1744,7 +1492,7 @@ async function handleShareTrip() {
               maxWidth: "100%",
               maxHeight: "100%",
               borderRadius: 12,
-              boxShadow: "0 0 20px black",
+              boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
             }}
           />
         </div>
