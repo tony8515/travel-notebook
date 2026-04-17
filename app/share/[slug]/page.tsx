@@ -265,23 +265,23 @@ export default function ShareTripPage() {
 
               <div style={gridStyle}>
                 <div>
-                  <div style={labelStyle}>Campground</div>
+                  <div style={labelStyle}>Accomodation</div>
                   <div style={valueStyle}>{entry.campground || "-"}</div>
                 </div>
                 <div>
-                  <div style={labelStyle}>Site</div>
+                  <div style={labelStyle}>Site/Room</div>
                   <div style={valueStyle}>{entry.site || "-"}</div>
                 </div>
                 <div>
-                  <div style={labelStyle}>Water</div>
+                  <div style={labelStyle}>Amenities</div>
                   <div style={valueStyle}>{entry.water || "-"}</div>
                 </div>
                 <div>
-                  <div style={labelStyle}>Bathroom</div>
+                  <div style={labelStyle}>Cleanliness</div>
                   <div style={valueStyle}>{entry.bathroom || "-"}</div>
                 </div>
                 <div>
-                  <div style={labelStyle}>Noise</div>
+                  <div style={labelStyle}>Quietness</div>
                   <div style={valueStyle}>{entry.noise || "-"}</div>
                 </div>
               </div>
