@@ -91,8 +91,8 @@ export default function ShareTripPage() {
             "id, trip, date, location, campground, site, water, bathroom, noise, rating, notes, photo_urls, created_at"
           )
           .eq("trip", tripData.name)
-          .order("date", { ascending: false })
-          .order("created_at", { ascending: false });
+          .order("date", { ascending: true })
+          .order("created_at", { ascending: true });
 
         if (entryError) throw entryError;
 

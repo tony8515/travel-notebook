@@ -1,5 +1,5 @@
 "use client";
-
+export const dynamic = "force-dynamic";
 import {
   ChangeEvent,
   CSSProperties,
@@ -9,13 +9,16 @@ import {
   useState,
 } from "react";
 import { supabase } from "@/lib/supabase";
-
+import dynamicImport from "next/dynamic";
+const TripMap = dynamicImport(() => import("./components/TripMapLeaflet"), {
+  ssr: false,
+});
 /** =========================
  *  꼭 확인할 2줄
  *  ========================= */
 const TABLE = "travel_entries";
 const PHOTO_BUCKET = "travel-photos";
-const DEFAULT_TRIP = "Spring 2026 West Road Trip";
+const DEFAULT_TRIP = "2026 Spring West Road Trip";
 const TRIP_STORAGE_KEY = "travel_v1_current_trip";
 
 /** =========================
@@ -36,6 +39,14 @@ type EntryRow = {
   notes: string | null;
   photo_urls: string[] | null;
   created_at?: string | null;
+};
+
+type MapPoint = {
+  id: string;
+  lat: number;
+  lng: number;
+  label: string;
+  date?: string;
 };
 
 type FormState = {
@@ -95,6 +106,14 @@ function toNullableNumber(v: string) {
   if (!t) return null;
   const n = Number(t);
   return Number.isFinite(n) ? n : null;
+}
+
+function makeSlug(name: string) {
+  return name
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-|-$)/g, "");
 }
 
 function makePhotoPath(userId: string, fileName: string) {
@@ -218,24 +237,49 @@ async function uploadOnePhoto(
 
   return { path, publicUrl };
 }
+async function getLatLng(address: string) {
+  try {
+    const res = await fetch(`/api/geocode?q=${encodeURIComponent(address)}`);
+    if (!res.ok) return null;
 
+    const data = await res.json();
+    if (!Array.isArray(data) || data.length === 0) return null;
+
+    return {
+      lat: parseFloat(data[0].lat),
+      lng: parseFloat(data[0].lon),
+    };
+  } catch (err) {
+    console.warn("fetch error:", address, err);
+    return null;
+  }
+}
 /** =========================
  *  Component
  *  ========================= */
+
 export default function TravelPage() {
   /** auth */
   const [session, setSession] = useState<SessionLike>(null);
   const [checkingAuth, setCheckingAuth] = useState(true);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+const [viewerOpen, setViewerOpen] = useState(false);
+const [viewerImage, setViewerImage] = useState<string | null>(null);
+const entryRefs = useRef<Record<string, HTMLDivElement | null>>({});
+const [currentLocation, setCurrentLocation] = useState<{ lat: number; lng: number } | null>(null);
+  /** share */
+  const [shareUrl, setShareUrl] = useState("");
+  const [sharingLoading, setSharingLoading] = useState(false);
 
   /** data */
   const [rows, setRows] = useState<EntryRow[]>([]);
   const [loadingRows, setLoadingRows] = useState(false);
-
   /** trip */
+  const [mapPoints, setMapPoints] = useState<any[]>([]);
   const [currentTrip, setCurrentTrip] = useState(DEFAULT_TRIP);
   const [showTripList, setShowTripList] = useState(false);
+const [showMap, setShowMap] = useState(false);
 
   /** form */
   const [form, setForm] = useState<FormState>(emptyForm());
@@ -271,10 +315,6 @@ export default function TravelPage() {
       set.add(currentTrip.trim());
     }
 
-    if (DEFAULT_TRIP.trim()) {
-      set.add(DEFAULT_TRIP.trim());
-    }
-
     return Array.from(set).sort((a, b) => a.localeCompare(b));
   }, [rows, currentTrip]);
 
@@ -296,6 +336,45 @@ export default function TravelPage() {
   /** =========================
    *  auth init
    *  ========================= */
+  useEffect(() => {
+  if (!navigator.geolocation) return;
+
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      setCurrentLocation({
+        lat: pos.coords.latitude,
+        lng: pos.coords.longitude,
+      });
+    },
+    () => {},
+    {
+      enableHighAccuracy: true,
+      timeout: 10000,
+      maximumAge: 300000,
+    }
+  );
+}, []);
+
+useEffect(() => {
+  if (!viewerOpen) return;
+
+  const originalOverflow = document.body.style.overflow;
+  document.body.style.overflow = "hidden";
+
+  const handleKeyDown = (event: KeyboardEvent) => {
+    if (event.key === "Escape") {
+      setViewerOpen(false);
+    }
+  };
+
+  window.addEventListener("keydown", handleKeyDown);
+
+  return () => {
+    document.body.style.overflow = originalOverflow;
+    window.removeEventListener("keydown", handleKeyDown);
+  };
+}, [viewerOpen]);
+
   useEffect(() => {
     let mounted = true;
 
@@ -363,6 +442,10 @@ export default function TravelPage() {
     localStorage.setItem(TRIP_STORAGE_KEY, currentTrip);
   }, [currentTrip]);
 
+  useEffect(() => {
+    setShareUrl("");
+  }, [currentTrip]);
+
   /** =========================
    *  rows load
    *  ========================= */
@@ -422,6 +505,55 @@ export default function TravelPage() {
     }
   }, [tripList, currentTrip]);
 
+useEffect(() => {
+  let cancelled = false;
+
+  async function loadPoints() {
+    const sortedRows = [...filteredRows].sort((a, b) => {
+      const da = `${a.date || ""} ${a.created_at || ""}`;
+      const db = `${b.date || ""} ${b.created_at || ""}`;
+      return da.localeCompare(db);
+    });
+
+    const results: { id: string; lat: number; lng: number; label: string; date?: string; }[] = [];
+
+    for (const row of sortedRows) {
+      if (!row.location) {
+        continue;
+      }
+
+      const coords = await getLatLng(row.location);
+      console.log("trying:", row.location);
+      console.log("coords:", coords);
+
+      if (coords) {
+        results.push({
+  id: row.id,
+  lat: coords.lat,
+  lng: coords.lng,
+  label: row.location,
+  date: row.date,
+});
+      }
+    }
+
+    console.log("results:", results);
+
+    if (!cancelled) {
+      setMapPoints(results);
+    }
+  }
+
+  if (filteredRows.length > 0) {
+    loadPoints();
+  } else {
+    setMapPoints([]);
+  }
+
+  return () => {
+    cancelled = true;
+  };
+}, [filteredRows]);
   /** =========================
    *  preview urls for pending files
    *  ========================= */
@@ -479,7 +611,7 @@ export default function TravelPage() {
   /** =========================
    *  trip handlers
    *  ========================= */
-  function handleCreateTrip() {
+  async function handleCreateTrip() {
     const raw = window.prompt("새 trip 이름을 입력하세요.", "");
     const name = raw?.trim();
 
@@ -492,13 +624,147 @@ export default function TravelPage() {
       return;
     }
 
-    setCurrentTrip(name);
-    setEditingId(null);
-    setForm(emptyForm());
-    setExistingPhotoUrls([]);
-    setNewPhotos([]);
-    setShowTripList(false);
-    setMessage(`새 trip 준비 완료: ${name}`);
+    try {
+      const { error } = await supabase.from("trips").insert({
+        name,
+        is_public: false,
+        share_slug: null,
+      });
+
+      if (error) throw error;
+
+      setCurrentTrip(name);
+      setEditingId(null);
+      setForm(emptyForm());
+      setExistingPhotoUrls([]);
+      setNewPhotos([]);
+      setShowTripList(false);
+      setMessage(`새 trip 준비 완료: ${name}`);
+    } catch (err: any) {
+      console.error(err);
+      setMessage(`새 trip 생성 오류: ${err?.message || "알 수 없는 오류"}`);
+    }
+  }
+
+async function handleShareTrip() {
+  if (!currentTrip || !session?.user?.id) return;
+
+  setSharingLoading(true);
+
+  try {
+    let { data: tripRow, error } = await supabase
+      .from("trips")
+      .select("id, name, share_slug, is_public")
+      .eq("user_id", session.user.id)
+      .eq("name", currentTrip)
+      .maybeSingle();
+
+    if (error) throw error;
+
+    // trips 테이블에 없으면 자동 생성
+    if (!tripRow) {
+      const { data: inserted, error: insertError } = await supabase
+        .from("trips")
+        .insert({
+          user_id: session.user.id,
+          name: currentTrip,
+          is_public: false,
+          share_slug: null,
+        })
+        .select("id, name, share_slug, is_public")
+        .single();
+
+      if (insertError) throw insertError;
+      tripRow = inserted;
+    }
+
+    let slug = tripRow.share_slug;
+
+    if (!slug) {
+      slug = makeSlug(tripRow.name);
+
+      const { data: existing, error: existingError } = await supabase
+        .from("trips")
+        .select("id")
+        .eq("share_slug", slug);
+
+      if (existingError) throw existingError;
+
+      if (existing && existing.length > 0) {
+        slug = `${slug}-${Math.floor(Math.random() * 1000)}`;
+      }
+
+      const { error: updateError } = await supabase
+        .from("trips")
+        .update({
+          share_slug: slug,
+          is_public: true,
+        })
+        .eq("id", tripRow.id);
+
+      if (updateError) throw updateError;
+    } else {
+      const { error: updateError } = await supabase
+        .from("trips")
+        .update({
+          is_public: true,
+        })
+        .eq("id", tripRow.id);
+
+      if (updateError) throw updateError;
+    }
+
+    const url = `${window.location.origin}/share/${slug}`;
+    setShareUrl(url);
+    setMessage("공유 링크 준비 완료");
+  } catch (err: any) {
+    console.error(err);
+    setMessage(`Share 생성 오류: ${err?.message || "알 수 없는 오류"}`);
+  } finally {
+    setSharingLoading(false);
+  }
+}
+
+  async function handleCopyLink() {
+    if (!shareUrl) return;
+
+    try {
+      await navigator.clipboard.writeText(shareUrl);
+      setMessage("링크가 복사되었습니다!");
+    } catch (err: any) {
+      console.error(err);
+      setMessage(`복사 오류: ${err?.message || "알 수 없는 오류"}`);
+    }
+  }
+
+  async function handleStopSharing() {
+    if (!currentTrip) return;
+
+    try {
+      const { data: tripRow, error } = await supabase
+        .from("trips")
+        .select("id")
+        .eq("name", currentTrip)
+        .single();
+
+      if (error || !tripRow) {
+        setMessage("Trip 정보를 찾을 수 없습니다.");
+        return;
+      }
+
+      const { error: updateError } = await supabase
+        .from("trips")
+        .update({ is_public: false })
+        .eq("id", tripRow.id);
+
+      if (updateError) throw updateError;
+
+      setShareUrl("");
+      setMessage("공유 중지 완료");
+    } catch (err: any) {
+      console.error(err);
+      setMessage(`공유 중지 오류: ${err?.message || "알 수 없는 오류"}`);
+    }
   }
 
   async function handleRenameTrip() {
@@ -514,13 +780,20 @@ export default function TravelPage() {
     if (!userId) return;
 
     try {
-      const { error } = await supabase
+      const { error: entryError } = await supabase
         .from(TABLE)
         .update({ trip: newTrip })
         .eq("user_id", userId)
         .eq("trip", oldTrip);
 
-      if (error) throw error;
+      if (entryError) throw entryError;
+
+      const { error: tripError } = await supabase
+        .from("trips")
+        .update({ name: newTrip })
+        .eq("name", oldTrip);
+
+      if (tripError) throw tripError;
 
       setRows((prev) =>
         prev.map((row) =>
@@ -551,13 +824,20 @@ export default function TravelPage() {
     if (!ok) return;
 
     try {
-      const { error } = await supabase
+      const { error: entryError } = await supabase
         .from(TABLE)
         .delete()
         .eq("user_id", userId)
         .eq("trip", tripToDelete);
 
-      if (error) throw error;
+      if (entryError) throw entryError;
+
+      const { error: tripError } = await supabase
+        .from("trips")
+        .delete()
+        .eq("name", tripToDelete);
+
+      if (tripError) throw tripError;
 
       const remainingRows = rows.filter(
         (row) => (row.trip?.trim() || "") !== tripToDelete
@@ -944,6 +1224,10 @@ export default function TravelPage() {
   /** =========================
    *  render - main
    *  ========================= */
+  const mapCenter: [number, number] =
+  mapPoints.length > 0
+    ? [Number(mapPoints[0].lat), Number(mapPoints[0].lng)]
+    : [33.749, -84.388];
   return (
     <div style={page}>
       <div style={card}>
@@ -1023,6 +1307,83 @@ export default function TravelPage() {
             <div style={{ fontSize: 18, fontWeight: 700 }}>{currentTrip}</div>
             <div style={{ color: "#6b7280", fontSize: 13, marginTop: 6 }}>
               Entries: {filteredRows.length} · Photos: {currentTripPhotoCount}
+            </div>
+<div style={{ marginTop: 12 }}>
+  <button
+    type="button"
+    onClick={() => setShowMap((prev) => !prev)}
+    style={{
+      padding: "8px 14px",
+      borderRadius: 12,
+      border: "1px solid #d1d5db",
+      background: "#ffffff",
+      fontSize: 15,
+      fontWeight: 600,
+      cursor: "pointer",
+    }}
+  >
+    {showMap ? "Map 숨기기 ▲" : "Map 보기 ▼"}
+  </button>
+</div>
+{showMap && (
+  <div
+    style={{
+      marginTop: 12,
+      marginLeft: -16,
+      marginRight: -90,
+      width: "calc(100% + 106px)",
+    }}
+  >
+<TripMap
+  key={mapPoints.map((p) => `${p.lat},${p.lng}`).join("|")}
+  points={mapPoints}
+  onPointClick={(id) => {
+    const el = entryRefs.current[id];
+    if (!el) return;
+
+    el.scrollIntoView({
+      behavior: "smooth",
+      block: "center",
+    });
+
+    el.style.outline = "3px solid #60a5fa";
+    el.style.outlineOffset = "4px";
+
+    setTimeout(() => {
+      el.style.outline = "";
+      el.style.outlineOffset = "";
+    }, 1500);
+  }}
+/>
+  </div>
+)}
+            <div style={{ marginTop: 10 }}>
+              <button
+                type="button"
+                style={btn}
+                onClick={handleShareTrip}
+                disabled={sharingLoading}
+              >
+                {sharingLoading ? "Sharing..." : "Share Trip"}
+              </button>
+
+              {shareUrl && (
+                <>
+                  <div style={{ marginTop: 8, fontSize: 14, wordBreak: "break-all" }}>
+                    {shareUrl}
+                  </div>
+
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 6 }}>
+                    <button type="button" style={btn} onClick={handleCopyLink}>
+                      Copy Link
+                    </button>
+
+                    <button type="button" style={dangerBtn} onClick={handleStopSharing}>
+                      Stop Sharing
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           </div>
 
@@ -1276,7 +1637,7 @@ export default function TravelPage() {
                         borderRadius: 8,
                         cursor: "pointer",
                       }}
-                      onClick={() => setPreviewUrl(url)}
+                      onClick={() => setViewerImage(url)}
                     />
                     <button
                       type="button"
@@ -1375,10 +1736,15 @@ export default function TravelPage() {
           <div style={{ color: "#6b7280" }}>이 trip에는 아직 기록이 없습니다.</div>
         ) : (
           <div style={{ display: "grid", gap: 12 }}>
-            {filteredRows.map((row) => (
-              <div
-                key={row.id}
-                style={{
+{[...filteredRows]
+  .sort((a, b) => a.date.localeCompare(b.date))   // 최신순
+  .map((row) => (
+  <div
+    key={row.id}
+    ref={(el) => {
+      entryRefs.current[row.id] = el;
+    }}
+    style={{
                   border: "1px solid #e5e7eb",
                   borderRadius: 14,
                   padding: 12,
@@ -1471,32 +1837,59 @@ export default function TravelPage() {
         )}
       </div>
 
-      {previewUrl && (
-        <div
-          onClick={() => setPreviewUrl(null)}
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,0.75)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: 16,
-            zIndex: 9999,
-          }}
-        >
-          <img
-            src={previewUrl}
-            alt="preview"
-            style={{
-              maxWidth: "100%",
-              maxHeight: "100%",
-              borderRadius: 12,
-              boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
-            }}
-          />
-        </div>
-      )}
+{previewUrl && (
+  <div
+    onClick={() => setPreviewUrl(null)}
+    style={{
+      position: "fixed",
+      inset: 0,
+      background: "rgba(0,0,0,0.85)",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: 16,
+      zIndex: 9999,
+      cursor: "zoom-out",
+    }}
+  >
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        setPreviewUrl(null);
+      }}
+      style={{
+        position: "absolute",
+        top: 16,
+        right: 16,
+        zIndex: 10000,
+        background: "rgba(0,0,0,0.7)",
+        color: "#fff",
+        border: "1px solid rgba(255,255,255,0.25)",
+        borderRadius: 10,
+        padding: "8px 12px",
+        fontSize: 16,
+        fontWeight: 700,
+        cursor: "pointer",
+      }}
+    >
+      ✕ 닫기
+    </button>
+
+    <img
+      src={previewUrl}
+      alt="preview"
+      onClick={(e) => e.stopPropagation()}
+      style={{
+        maxWidth: "100%",
+        maxHeight: "100%",
+        borderRadius: 12,
+        objectFit: "contain",
+        boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
+      }}
+    />
+  </div>
+)}
     </div>
   );
 }

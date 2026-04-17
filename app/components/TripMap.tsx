@@ -1,70 +1,27 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useEffect, useState } from "react";
+import type { MapPoint } from "./TripMapLeaflet";
 
-type MapPoint = {
-  lat: number;
-  lng: number;
-  label: string;
+const TripMapLeaflet = dynamic(() => import("./TripMapLeaflet"), {
+  ssr: false,
+});
+
+type Props = {
+  points: MapPoint[];
+  onPointClick?: (id: string) => void;
+  currentLocation?: { lat: number; lng: number } | null;
 };
 
-export default function TripMap({ mapPoints }: { mapPoints: MapPoint[] }) {
-  const [Map, setMap] = useState<any>(null);
+export default function TripMap(props: Props) {
+  const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
-    const loadMap = async () => {
-      const L = await import("leaflet");
-      const RL = await import("react-leaflet");
-
-      const {
-        MapContainer,
-        TileLayer,
-        Marker,
-        Popup,
-        Polyline,
-      } = RL;
-
-      setMap(() => ({
-        MapContainer,
-        TileLayer,
-        Marker,
-        Popup,
-        Polyline,
-      }));
-    };
-
-    loadMap();
+    setMounted(true);
   }, []);
 
-  if (!Map) return <div>Loading map...</div>;
+  if (!mounted) return null;
 
-  if (!mapPoints.length) {
-    return <div style={{ color: "gray" }}>지도에 표시할 location이 아직 없습니다.</div>;
-  }
-
-  const { MapContainer, TileLayer, Marker, Popup, Polyline } = Map;
-
-  const mapCenter: [number, number] = [mapPoints[0].lat, mapPoints[0].lng];
-  const polylinePositions: [number, number][] = mapPoints.map((p) => [p.lat, p.lng]);
-
-  return (
-    <MapContainer
-      center={mapCenter}
-      zoom={5}
-      style={{ height: 400, width: "100%", borderRadius: 16 }}
-    >
-      <TileLayer
-        attribution="&copy; OpenStreetMap contributors"
-        url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-      />
-
-      {mapPoints.map((p, i) => (
-        <Marker key={i} position={[p.lat, p.lng]}>
-          <Popup>{p.label}</Popup>
-        </Marker>
-      ))}
-
-      <Polyline positions={polylinePositions} />
-    </MapContainer>
-  );
+  return <TripMapLeaflet {...props} />;
 }

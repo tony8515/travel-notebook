@@ -1,5 +1,5 @@
 "use client";
-
+export const dynamic = "force-dynamic";
 import {
   ChangeEvent,
   CSSProperties,
@@ -9,14 +9,16 @@ import {
   useState,
 } from "react";
 import { supabase } from "@/lib/supabase";
-import dynamic from "next/dynamic";
-const TripMap = dynamic(() => import("./components/TripMap"), { ssr: false });
+import dynamicImport from "next/dynamic";
+const TripMap = dynamicImport(() => import("./components/TripMapLeaflet"), {
+  ssr: false,
+});
 /** =========================
  *  꼭 확인할 2줄
  *  ========================= */
 const TABLE = "travel_entries";
 const PHOTO_BUCKET = "travel-photos";
-const DEFAULT_TRIP = "Spring 2026 West Road Trip";
+const DEFAULT_TRIP = "2026 Spring West Road Trip";
 const TRIP_STORAGE_KEY = "travel_v1_current_trip";
 
 /** =========================
@@ -37,6 +39,14 @@ type EntryRow = {
   notes: string | null;
   photo_urls: string[] | null;
   created_at?: string | null;
+};
+
+type MapPoint = {
+  id: string;
+  lat: number;
+  lng: number;
+  label: string;
+  date?: string;
 };
 
 type FormState = {
@@ -228,27 +238,36 @@ async function uploadOnePhoto(
   return { path, publicUrl };
 }
 async function getLatLng(address: string) {
-  const res = await fetch(
-    `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}`
-  );
-  const data = await res.json();
-  if (!data || data.length === 0) return null;
+  try {
+    const res = await fetch(`/api/geocode?q=${encodeURIComponent(address)}`);
+    if (!res.ok) return null;
 
-  return {
-    lat: parseFloat(data[0].lat),
-    lng: parseFloat(data[0].lon),
-  };
+    const data = await res.json();
+    if (!Array.isArray(data) || data.length === 0) return null;
+
+    return {
+      lat: parseFloat(data[0].lat),
+      lng: parseFloat(data[0].lon),
+    };
+  } catch (err) {
+    console.warn("fetch error:", address, err);
+    return null;
+  }
 }
 /** =========================
  *  Component
  *  ========================= */
+
 export default function TravelPage() {
   /** auth */
   const [session, setSession] = useState<SessionLike>(null);
   const [checkingAuth, setCheckingAuth] = useState(true);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-
+const [viewerOpen, setViewerOpen] = useState(false);
+const [viewerImage, setViewerImage] = useState<string | null>(null);
+const entryRefs = useRef<Record<string, HTMLDivElement | null>>({});
+const [currentLocation, setCurrentLocation] = useState<{ lat: number; lng: number } | null>(null);
   /** share */
   const [shareUrl, setShareUrl] = useState("");
   const [sharingLoading, setSharingLoading] = useState(false);
@@ -256,10 +275,11 @@ export default function TravelPage() {
   /** data */
   const [rows, setRows] = useState<EntryRow[]>([]);
   const [loadingRows, setLoadingRows] = useState(false);
-const [mapPoints, setMapPoints] = useState<any[]>([]);
   /** trip */
+  const [mapPoints, setMapPoints] = useState<any[]>([]);
   const [currentTrip, setCurrentTrip] = useState(DEFAULT_TRIP);
   const [showTripList, setShowTripList] = useState(false);
+const [showMap, setShowMap] = useState(false);
 
   /** form */
   const [form, setForm] = useState<FormState>(emptyForm());
@@ -295,10 +315,6 @@ const [mapPoints, setMapPoints] = useState<any[]>([]);
       set.add(currentTrip.trim());
     }
 
-    if (DEFAULT_TRIP.trim()) {
-      set.add(DEFAULT_TRIP.trim());
-    }
-
     return Array.from(set).sort((a, b) => a.localeCompare(b));
   }, [rows, currentTrip]);
 
@@ -320,6 +336,45 @@ const [mapPoints, setMapPoints] = useState<any[]>([]);
   /** =========================
    *  auth init
    *  ========================= */
+  useEffect(() => {
+  if (!navigator.geolocation) return;
+
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      setCurrentLocation({
+        lat: pos.coords.latitude,
+        lng: pos.coords.longitude,
+      });
+    },
+    () => {},
+    {
+      enableHighAccuracy: true,
+      timeout: 10000,
+      maximumAge: 300000,
+    }
+  );
+}, []);
+
+useEffect(() => {
+  if (!viewerOpen) return;
+
+  const originalOverflow = document.body.style.overflow;
+  document.body.style.overflow = "hidden";
+
+  const handleKeyDown = (event: KeyboardEvent) => {
+    if (event.key === "Escape") {
+      setViewerOpen(false);
+    }
+  };
+
+  window.addEventListener("keydown", handleKeyDown);
+
+  return () => {
+    document.body.style.overflow = originalOverflow;
+    window.removeEventListener("keydown", handleKeyDown);
+  };
+}, [viewerOpen]);
+
   useEffect(() => {
     let mounted = true;
 
@@ -450,7 +505,7 @@ const [mapPoints, setMapPoints] = useState<any[]>([]);
     }
   }, [tripList, currentTrip]);
 
-  useEffect(() => {
+useEffect(() => {
   let cancelled = false;
 
   async function loadPoints() {
@@ -460,19 +515,29 @@ const [mapPoints, setMapPoints] = useState<any[]>([]);
       return da.localeCompare(db);
     });
 
-    const results: { lat: number; lng: number; label: string }[] = [];
+    const results: { id: string; lat: number; lng: number; label: string; date?: string; }[] = [];
 
     for (const row of sortedRows) {
-      if (!row.location) continue;
+      if (!row.location) {
+        continue;
+      }
 
       const coords = await getLatLng(row.location);
+      console.log("trying:", row.location);
+      console.log("coords:", coords);
+
       if (coords) {
         results.push({
-          ...coords,
-          label: row.location,
-        });
+  id: row.id,
+  lat: coords.lat,
+  lng: coords.lng,
+  label: row.location,
+  date: row.date,
+});
       }
     }
+
+    console.log("results:", results);
 
     if (!cancelled) {
       setMapPoints(results);
@@ -1243,7 +1308,55 @@ async function handleShareTrip() {
             <div style={{ color: "#6b7280", fontSize: 13, marginTop: 6 }}>
               Entries: {filteredRows.length} · Photos: {currentTripPhotoCount}
             </div>
+<div style={{ marginTop: 12 }}>
+  <button
+    type="button"
+    onClick={() => setShowMap((prev) => !prev)}
+    style={{
+      padding: "8px 14px",
+      borderRadius: 12,
+      border: "1px solid #d1d5db",
+      background: "#ffffff",
+      fontSize: 15,
+      fontWeight: 600,
+      cursor: "pointer",
+    }}
+  >
+    {showMap ? "Map 숨기기 ▲" : "Map 보기 ▼"}
+  </button>
+</div>
+{showMap && (
+  <div
+    style={{
+      marginTop: 12,
+      marginLeft: -16,
+      marginRight: -90,
+      width: "calc(100% + 106px)",
+    }}
+  >
+<TripMap
+  key={mapPoints.map((p) => `${p.lat},${p.lng}`).join("|")}
+  points={mapPoints}
+  onPointClick={(id) => {
+    const el = entryRefs.current[id];
+    if (!el) return;
 
+    el.scrollIntoView({
+      behavior: "smooth",
+      block: "center",
+    });
+
+    el.style.outline = "3px solid #60a5fa";
+    el.style.outlineOffset = "4px";
+
+    setTimeout(() => {
+      el.style.outline = "";
+      el.style.outlineOffset = "";
+    }, 1500);
+  }}
+/>
+  </div>
+)}
             <div style={{ marginTop: 10 }}>
               <button
                 type="button"
@@ -1370,7 +1483,7 @@ async function handleShareTrip() {
               style={input}
               value={form.location}
               onChange={(e) => setField("location", e.target.value)}
-              placeholder="예: Zion NP"
+              placeholder="예: City, Zion NP"
             />
           </div>
         </div>
@@ -1379,15 +1492,16 @@ async function handleShareTrip() {
 
         <div style={row3}>
           <div>
-            <label style={label}>Campground</label>
+            <label style={label}>Accomodation</label>
             <input
               style={input}
               value={form.campground}
               onChange={(e) => setField("campground", e.target.value)}
+              placeholder="Hotel, Airbnb, Campground, etc."
             />
           </div>
           <div>
-            <label style={label}>Site</label>
+            <label style={label}>Site/Room</label>
             <input
               style={input}
               value={form.site}
@@ -1412,30 +1526,30 @@ async function handleShareTrip() {
 
         <div style={row3}>
           <div>
-            <label style={label}>Water</label>
+            <label style={label}>Amenities</label>
             <input
               style={input}
               value={form.water}
               onChange={(e) => setField("water", e.target.value)}
-              placeholder="예: yes / no / nearby"
+              placeholder="예: water, power, Wi-Fi, breakfast"
             />
           </div>
           <div>
-            <label style={label}>Bathroom</label>
+            <label style={label}>Cleanliness</label>
             <input
               style={input}
               value={form.bathroom}
               onChange={(e) => setField("bathroom", e.target.value)}
-              placeholder="예: flush / vault"
+              placeholder="예: clean, fair, needs improvement"
             />
           </div>
           <div>
-            <label style={label}>Noise</label>
+            <label style={label}>Quiteness</label>
             <input
               style={input}
               value={form.noise}
               onChange={(e) => setField("noise", e.target.value)}
-              placeholder="예: quiet / road noise"
+              placeholder="예: quiet, some street noise, very noisy"
             />
           </div>
         </div>
@@ -1524,7 +1638,7 @@ async function handleShareTrip() {
                         borderRadius: 8,
                         cursor: "pointer",
                       }}
-                      onClick={() => setPreviewUrl(url)}
+                      onClick={() => setViewerImage(url)}
                     />
                     <button
                       type="button"
@@ -1623,10 +1737,15 @@ async function handleShareTrip() {
           <div style={{ color: "#6b7280" }}>이 trip에는 아직 기록이 없습니다.</div>
         ) : (
           <div style={{ display: "grid", gap: 12 }}>
-            {filteredRows.map((row) => (
-              <div
-                key={row.id}
-                style={{
+{[...filteredRows]
+  .sort((a, b) => a.date.localeCompare(b.date))   // 최신순
+  .map((row) => (
+  <div
+    key={row.id}
+    ref={(el) => {
+      entryRefs.current[row.id] = el;
+    }}
+    style={{
                   border: "1px solid #e5e7eb",
                   borderRadius: 14,
                   padding: 12,
@@ -1648,7 +1767,7 @@ async function handleShareTrip() {
                     </div>
                     <div style={{ marginTop: 4, color: "#6b7280", fontSize: 13 }}>
                       {row.trip || ""} {row.campground ? `· ${row.campground}` : ""}
-                      {row.site ? ` · Site ${row.site}` : ""}
+                      {row.site ? ` · Site/Room ${row.site}` : ""}
                     </div>
                   </div>
 
@@ -1673,9 +1792,9 @@ async function handleShareTrip() {
 
                 {(row.water || row.bathroom || row.noise || row.rating != null) && (
                   <div style={{ marginTop: 8, color: "#374151", fontSize: 14 }}>
-                    {row.water ? `Water: ${row.water}  ` : ""}
-                    {row.bathroom ? `Bathroom: ${row.bathroom}  ` : ""}
-                    {row.noise ? `Noise: ${row.noise}  ` : ""}
+                    {row.water ? `Amenities: ${row.water}  ` : ""}
+                    {row.bathroom ? `Cleanliness: ${row.bathroom}  ` : ""}
+                    {row.noise ? `Quiteness: ${row.noise}  ` : ""}
                     {row.rating != null ? `Rating: ${row.rating}` : ""}
                   </div>
                 )}
@@ -1718,37 +1837,60 @@ async function handleShareTrip() {
           </div>
         )}
       </div>
-<div style={card}>
-  <h3 style={{ marginTop: 0, marginBottom: 12 }}>Trip Map</h3>
-  <TripMap mapPoints={mapPoints} />
-</div>
-      {previewUrl && (
-        <div
-          onClick={() => setPreviewUrl(null)}
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "black",
-            opacity: 0.75,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: 16,
-            zIndex: 9999,
-          }}
-        >
-          <img
-            src={previewUrl}
-            alt="preview"
-            style={{
-              maxWidth: "100%",
-              maxHeight: "100%",
-              borderRadius: 12,
-              boxShadow: "0 0 20px black",
-            }}
-          />
-        </div>
-      )}
+
+{previewUrl && (
+  <div
+    onClick={() => setPreviewUrl(null)}
+    style={{
+      position: "fixed",
+      inset: 0,
+      background: "rgba(0,0,0,0.85)",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: 16,
+      zIndex: 9999,
+      cursor: "zoom-out",
+    }}
+  >
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        setPreviewUrl(null);
+      }}
+      style={{
+        position: "absolute",
+        top: 16,
+        right: 16,
+        zIndex: 10000,
+        background: "rgba(0,0,0,0.7)",
+        color: "#fff",
+        border: "1px solid rgba(255,255,255,0.25)",
+        borderRadius: 10,
+        padding: "8px 12px",
+        fontSize: 16,
+        fontWeight: 700,
+        cursor: "pointer",
+      }}
+    >
+      ✕ 닫기
+    </button>
+
+    <img
+      src={previewUrl}
+      alt="preview"
+      onClick={(e) => e.stopPropagation()}
+      style={{
+        maxWidth: "100%",
+        maxHeight: "100%",
+        borderRadius: 12,
+        objectFit: "contain",
+        boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
+      }}
+    />
+  </div>
+)}
     </div>
   );
 }
