@@ -1,17 +1,17 @@
 "use client";
-export const dynamic = "force-dynamic";
-import "leaflet/dist/leaflet.css";
-import { useEffect } from "react";
+
+import { useEffect, useMemo, useState } from "react";
 import {
-  MapContainer,
-  TileLayer,
-  Popup,
-  Polyline,
   CircleMarker,
+  MapContainer,
+  Polyline,
+  Popup,
+  TileLayer,
   useMap,
 } from "react-leaflet";
+import "leaflet/dist/leaflet.css";
 
-export type MapPoint = {
+type Point = {
   id: string;
   lat: number;
   lng: number;
@@ -19,31 +19,31 @@ export type MapPoint = {
   date?: string;
 };
 
-type Props = {
-  points: MapPoint[];
-  onPointClick?: (id: string) => void;
-  currentLocation?: { lat: number; lng: number } | null;
-};
-
 function FitBounds({
   points,
   currentLocation,
 }: {
-  points: MapPoint[];
+  points: Point[];
   currentLocation?: { lat: number; lng: number } | null;
 }) {
   const map = useMap();
 
   useEffect(() => {
-    const bounds: [number, number][] = points.map((p) => [p.lat, p.lng]);
+    const allPoints: [number, number][] = [
+      ...points.map((p) => [p.lat, p.lng] as [number, number]),
+      ...(currentLocation
+        ? [[currentLocation.lat, currentLocation.lng] as [number, number]]
+        : []),
+    ];
 
-    if (currentLocation) {
-      bounds.push([currentLocation.lat, currentLocation.lng]);
+    if (allPoints.length === 0) return;
+
+    if (allPoints.length === 1) {
+      map.setView(allPoints[0], 7);
+      return;
     }
 
-    if (!bounds.length) return;
-
-    map.fitBounds(bounds, { padding: [20, 20] });
+    map.fitBounds(allPoints, { padding: [30, 30] });
   }, [map, points, currentLocation]);
 
   return null;
@@ -51,10 +51,26 @@ function FitBounds({
 
 export default function TripMapLeaflet({
   points,
-  onPointClick,
   currentLocation,
-}: Props) {
-  if (!points.length && !currentLocation) {
+  onPointClick,
+}: {
+  points: Point[];
+  currentLocation?: { lat: number; lng: number } | null;
+  onPointClick?: (id: string) => void;
+}) {
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+    return () => setMounted(false);
+  }, []);
+
+  const polylinePositions = useMemo<[number, number][]>(
+    () => points.map((p) => [p.lat, p.lng]),
+    [points]
+  );
+
+  if (!points.length) {
     return (
       <div style={{ color: "gray", padding: 8 }}>
         지도에 표시할 location이 아직 없습니다.
@@ -62,17 +78,31 @@ export default function TripMapLeaflet({
     );
   }
 
-  const polylinePositions: [number, number][] = points.map((p) => [p.lat, p.lng]);
+  if (!mounted) {
+    return (
+      <div style={{ color: "gray", padding: 8 }}>
+        지도를 불러오는 중...
+      </div>
+    );
+  }
 
   return (
     <div style={{ overflow: "hidden", borderRadius: 16 }}>
-      <MapContainer center={[37, -96]} zoom={4} style={{ height: 360, width: "100%" }}>
+      <MapContainer
+        center={[37, -96]}
+        zoom={4}
+        style={{ height: 360, width: "100%" }}
+      >
         <FitBounds points={points} currentLocation={currentLocation} />
 
         <TileLayer
           attribution="&copy; OpenStreetMap contributors"
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
+
+        {polylinePositions.length > 1 && (
+          <Polyline positions={polylinePositions} />
+        )}
 
         {points.map((p, i) => (
           <CircleMarker
@@ -97,18 +127,11 @@ export default function TripMapLeaflet({
           <CircleMarker
             center={[currentLocation.lat, currentLocation.lng]}
             radius={9}
-            pathOptions={{
-              weight: 3,
-              color: "#2563eb",
-              fillColor: "#60a5fa",
-              fillOpacity: 0.9,
-            }}
+            pathOptions={{ weight: 2 }}
           >
-            <Popup>현재 위치</Popup>
+            <Popup>Current location</Popup>
           </CircleMarker>
         ) : null}
-
-        {polylinePositions.length >= 2 ? <Polyline positions={polylinePositions} /> : null}
       </MapContainer>
     </div>
   );

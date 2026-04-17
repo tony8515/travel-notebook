@@ -507,7 +507,7 @@ useEffect(() => {
 
 useEffect(() => {
   let cancelled = false;
-
+  let alreadyLoaded = false;
   async function loadPoints() {
     const sortedRows = [...filteredRows].sort((a, b) => {
       const da = `${a.date || ""} ${a.created_at || ""}`;
@@ -515,25 +515,33 @@ useEffect(() => {
       return da.localeCompare(db);
     });
 
-    const results: { id: string; lat: number; lng: number; label: string; date?: string; }[] = [];
+    const results: { id: string; lat: number; lng: number; label: string; date?: string }[] = [];
+    const geoCache: Record<string, { lat: number; lng: number } | null> = {};
 
     for (const row of sortedRows) {
-      if (!row.location) {
-        continue;
+      const query = row.location || "";
+
+      if (!query) continue;
+
+      let coords = geoCache[query];
+
+      if (coords === undefined) {
+        await new Promise((r) => setTimeout(r, 1000));
+        coords = await getLatLng(query);
+        geoCache[query] = coords;
       }
 
-      const coords = await getLatLng(row.location);
-      console.log("trying:", row.location);
+      console.log("trying:", query);
       console.log("coords:", coords);
 
       if (coords) {
         results.push({
-  id: row.id,
-  lat: coords.lat,
-  lng: coords.lng,
-  label: row.location,
-  date: row.date,
-});
+          id: row.id,
+          lat: coords.lat,
+          lng: coords.lng,
+          label: row.location || row.campground || "Unknown place",
+          date: row.date,
+        });
       }
     }
 
