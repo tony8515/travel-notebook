@@ -11,7 +11,7 @@ import {
 } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 
-type Point = {
+export type MapPoint = {
   id: string;
   lat: number;
   lng: number;
@@ -23,7 +23,7 @@ function FitBounds({
   points,
   currentLocation,
 }: {
-  points: Point[];
+  points: MapPoint[];
   currentLocation?: { lat: number; lng: number } | null;
 }) {
   const map = useMap();
@@ -54,7 +54,7 @@ export default function TripMapLeaflet({
   currentLocation,
   onPointClick,
 }: {
-  points: Point[];
+  points: MapPoint[];
   currentLocation?: { lat: number; lng: number } | null;
   onPointClick?: (id: string) => void;
 }) {
