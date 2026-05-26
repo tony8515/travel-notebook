@@ -1,5 +1,6 @@
 "use client";
 export const dynamic = "force-dynamic";
+
 import {
   ChangeEvent,
   CSSProperties,
@@ -10,9 +11,11 @@ import {
 } from "react";
 import { supabase } from "@/lib/supabase";
 import dynamicImport from "next/dynamic";
+
 const TripMap = dynamicImport(() => import("./components/TripMapLeaflet"), {
   ssr: false,
 });
+
 /** =========================
  *  꼭 확인할 2줄
  *  ========================= */
@@ -37,16 +40,8 @@ type EntryRow = {
   noise: string | null;
   rating: number | null;
   notes: string | null;
-  photo_urls: string[] | null;
+  photo_urls: string[] | null; // 기존 컬럼 유지: 이미지 + 비디오 URL 함께 저장
   created_at?: string | null;
-};
-
-type MapPoint = {
-  id: string;
-  lat: number;
-  lng: number;
-  label: string;
-  date?: string;
 };
 
 type FormState = {
@@ -67,6 +62,18 @@ type SessionLike = {
     email?: string;
   } | null;
 } | null;
+
+type ViewerItem = {
+  url: string;
+  type: "image" | "video";
+  label?: string;
+};
+
+type PendingMediaItem = {
+  file: File;
+  previewUrl: string;
+  type: "image" | "video";
+};
 
 /** =========================
  *  Helpers
@@ -126,6 +133,27 @@ function makePhotoPath(userId: string, fileName: string) {
 function fileToJpgName(name: string) {
   const base = name.replace(/\.[^.]+$/, "");
   return `${base}.jpg`;
+}
+
+function isImageFile(file: File) {
+  return file.type.startsWith("image/");
+}
+
+function isVideoFile(file: File) {
+  return file.type.startsWith("video/");
+}
+
+function isVideoUrl(url: string) {
+  return /\.(mp4|mov|m4v|webm|ogg)$/i.test(url.split("?")[0]);
+}
+
+function mediaTypeFromUrl(url: string): "image" | "video" {
+  return isVideoUrl(url) ? "video" : "image";
+}
+
+function formatFileSize(size: number) {
+  if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 async function compressImage(file: File): Promise<File> {
@@ -204,7 +232,7 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, message: string) 
   });
 }
 
-async function uploadOnePhoto(
+async function uploadOneMedia(
   userId: string,
   file: File
 ): Promise<{ path: string; publicUrl: string }> {
@@ -215,28 +243,27 @@ async function uploadOnePhoto(
     .upload(path, file, {
       cacheControl: "3600",
       upsert: false,
-      contentType: file.type || "image/jpeg",
+      contentType: file.type || "application/octet-stream",
     });
 
   const { error } = await withTimeout(
     uploadPromise,
-    120000,
+    isVideoFile(file) ? 300000 : 120000,
     "업로드 시간 초과 (upload timeout)"
   );
 
-  if (error) {
-    throw error;
-  }
+  if (error) throw error;
 
   const { data } = supabase.storage.from(PHOTO_BUCKET).getPublicUrl(path);
   const publicUrl = data.publicUrl;
 
   if (!publicUrl) {
-    throw new Error("사진 URL 생성 실패");
+    throw new Error("미디어 URL 생성 실패");
   }
 
   return { path, publicUrl };
 }
+
 async function getLatLng(address: string) {
   try {
     const res = await fetch(`/api/geocode?q=${encodeURIComponent(address)}`);
@@ -254,20 +281,24 @@ async function getLatLng(address: string) {
     return null;
   }
 }
+
 /** =========================
  *  Component
  *  ========================= */
-
 export default function TravelPage() {
   /** auth */
   const [session, setSession] = useState<SessionLike>(null);
   const [checkingAuth, setCheckingAuth] = useState(true);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-const [viewerOpen, setViewerOpen] = useState(false);
-const [viewerImage, setViewerImage] = useState<string | null>(null);
-const entryRefs = useRef<Record<string, HTMLDivElement | null>>({});
-const [currentLocation, setCurrentLocation] = useState<{ lat: number; lng: number } | null>(null);
+
+  /** map / refs */
+  const entryRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const [currentLocation, setCurrentLocation] = useState<{
+    lat: number;
+    lng: number;
+  } | null>(null);
+
   /** share */
   const [shareUrl, setShareUrl] = useState("");
   const [sharingLoading, setSharingLoading] = useState(false);
@@ -275,30 +306,34 @@ const [currentLocation, setCurrentLocation] = useState<{ lat: number; lng: numbe
   /** data */
   const [rows, setRows] = useState<EntryRow[]>([]);
   const [loadingRows, setLoadingRows] = useState(false);
-  /** trip */
   const [mapPoints, setMapPoints] = useState<any[]>([]);
+
+  /** trip */
   const [currentTrip, setCurrentTrip] = useState(DEFAULT_TRIP);
   const [showTripList, setShowTripList] = useState(false);
-const [showMap, setShowMap] = useState(false);
+  const [showMap, setShowMap] = useState(false);
 
   /** form */
   const [form, setForm] = useState<FormState>(emptyForm());
   const [editingId, setEditingId] = useState<string | null>(null);
 
-  /** photos */
-  const choosePhotosRef = useRef<HTMLInputElement | null>(null);
+  /** media inputs */
+  const chooseMediaRef = useRef<HTMLInputElement | null>(null);
   const takePhotoRef = useRef<HTMLInputElement | null>(null);
 
-  const [existingPhotoUrls, setExistingPhotoUrls] = useState<string[]>([]);
-  const [newPhotos, setNewPhotos] = useState<File[]>([]);
-  const [newPhotoPreviews, setNewPhotoPreviews] = useState<string[]>([]);
+  const [existingMediaUrls, setExistingMediaUrls] = useState<string[]>([]);
+  const [newMedia, setNewMedia] = useState<PendingMediaItem[]>([]);
+
+  /** viewer */
+  const [viewerOpen, setViewerOpen] = useState(false);
+  const [viewerItems, setViewerItems] = useState<ViewerItem[]>([]);
+  const [viewerIndex, setViewerIndex] = useState(0);
 
   /** ui */
   const [saving, setSaving] = useState(false);
   const [logoutBusy, setLogoutBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [uploadProgress, setUploadProgress] = useState("");
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
   /** =========================
    *  derived: trips
@@ -322,58 +357,91 @@ const [showMap, setShowMap] = useState(false);
     return rows.filter((row) => (row.trip?.trim() || "") === currentTrip.trim());
   }, [rows, currentTrip]);
 
-  const currentTripPhotoCount = useMemo(
-    () =>
-      filteredRows.reduce((sum, row) => sum + (row.photo_urls?.length ?? 0), 0),
+  const currentTripMediaCount = useMemo(
+    () => filteredRows.reduce((sum, row) => sum + (row.photo_urls?.length ?? 0), 0),
     [filteredRows]
   );
 
-  const totalPhotoCount = useMemo(
-    () => existingPhotoUrls.length + newPhotos.length,
-    [existingPhotoUrls.length, newPhotos.length]
+  const totalMediaCount = useMemo(
+    () => existingMediaUrls.length + newMedia.length,
+    [existingMediaUrls.length, newMedia.length]
   );
+
+  /** =========================
+   *  viewer helpers
+   *  ========================= */
+  function openViewer(items: ViewerItem[], startIndex = 0) {
+    if (!items.length) return;
+    setViewerItems(items);
+    setViewerIndex(startIndex);
+    setViewerOpen(true);
+  }
+
+  function closeViewer() {
+    setViewerOpen(false);
+  }
+
+  function goPrevViewer() {
+    setViewerIndex((prev) => {
+      if (!viewerItems.length) return 0;
+      return prev === 0 ? viewerItems.length - 1 : prev - 1;
+    });
+  }
+
+  function goNextViewer() {
+    setViewerIndex((prev) => {
+      if (!viewerItems.length) return 0;
+      return prev === viewerItems.length - 1 ? 0 : prev + 1;
+    });
+  }
+
+  const currentViewerItem = viewerItems[viewerIndex] || null;
 
   /** =========================
    *  auth init
    *  ========================= */
   useEffect(() => {
-  if (!navigator.geolocation) return;
+    if (!navigator.geolocation) return;
 
-  navigator.geolocation.getCurrentPosition(
-    (pos) => {
-      setCurrentLocation({
-        lat: pos.coords.latitude,
-        lng: pos.coords.longitude,
-      });
-    },
-    () => {},
-    {
-      enableHighAccuracy: true,
-      timeout: 10000,
-      maximumAge: 300000,
-    }
-  );
-}, []);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setCurrentLocation({
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude,
+        });
+      },
+      () => {},
+      {
+        enableHighAccuracy: true,
+        timeout: 10000,
+        maximumAge: 300000,
+      }
+    );
+  }, []);
 
-useEffect(() => {
-  if (!viewerOpen) return;
+  useEffect(() => {
+    if (!viewerOpen) return;
 
-  const originalOverflow = document.body.style.overflow;
-  document.body.style.overflow = "hidden";
+    const originalOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
 
-  const handleKeyDown = (event: KeyboardEvent) => {
-    if (event.key === "Escape") {
-      setViewerOpen(false);
-    }
-  };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        closeViewer();
+      } else if (event.key === "ArrowLeft") {
+        goPrevViewer();
+      } else if (event.key === "ArrowRight") {
+        goNextViewer();
+      }
+    };
 
-  window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keydown", handleKeyDown);
 
-  return () => {
-    document.body.style.overflow = originalOverflow;
-    window.removeEventListener("keydown", handleKeyDown);
-  };
-}, [viewerOpen]);
+    return () => {
+      document.body.style.overflow = originalOverflow;
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [viewerOpen, viewerItems.length]);
 
   useEffect(() => {
     let mounted = true;
@@ -401,7 +469,10 @@ useEffect(() => {
         if (!mounted) return;
 
         const msg = String(err?.message || "");
-        if (msg.includes("Lock broken by another request") || err?.name === "AbortError") {
+        if (
+          msg.includes("Lock broken by another request") ||
+          err?.name === "AbortError"
+        ) {
           setCheckingAuth(false);
           return;
         }
@@ -471,13 +542,8 @@ useEffect(() => {
 
       const msg = String(err?.message || "");
 
-      if (msg.includes("Lock broken by another request")) {
-        return;
-      }
-
-      if (err?.name === "AbortError") {
-        return;
-      }
+      if (msg.includes("Lock broken by another request")) return;
+      if (err?.name === "AbortError") return;
 
       setMessage(`불러오기 오류: ${msg || "알 수 없는 오류"}`);
     } finally {
@@ -505,74 +571,75 @@ useEffect(() => {
     }
   }, [tripList, currentTrip]);
 
-useEffect(() => {
-  let cancelled = false;
-  let alreadyLoaded = false;
-  async function loadPoints() {
-    const sortedRows = [...filteredRows].sort((a, b) => {
-      const da = `${a.date || ""} ${a.created_at || ""}`;
-      const db = `${b.date || ""} ${b.created_at || ""}`;
-      return da.localeCompare(db);
-    });
-
-    const results: { id: string; lat: number; lng: number; label: string; date?: string }[] = [];
-    const geoCache: Record<string, { lat: number; lng: number } | null> = {};
-
-    for (const row of sortedRows) {
-      const query = row.location || "";
-
-      if (!query) continue;
-
-      let coords = geoCache[query];
-
-      if (coords === undefined) {
-        await new Promise((r) => setTimeout(r, 1000));
-        coords = await getLatLng(query);
-        geoCache[query] = coords;
-      }
-
-      console.log("trying:", query);
-      console.log("coords:", coords);
-
-      if (coords) {
-        results.push({
-          id: row.id,
-          lat: coords.lat,
-          lng: coords.lng,
-          label: row.location || row.campground || "Unknown place",
-          date: row.date,
-        });
-      }
-    }
-
-    console.log("results:", results);
-
-    if (!cancelled) {
-      setMapPoints(results);
-    }
-  }
-
-  if (filteredRows.length > 0) {
-    loadPoints();
-  } else {
-    setMapPoints([]);
-  }
-
-  return () => {
-    cancelled = true;
-  };
-}, [filteredRows]);
   /** =========================
-   *  preview urls for pending files
+   *  map points load
    *  ========================= */
   useEffect(() => {
-    const urls = newPhotos.map((f) => URL.createObjectURL(f));
-    setNewPhotoPreviews(urls);
+    let cancelled = false;
+
+    async function loadPoints() {
+      const sortedRows = [...filteredRows].sort((a, b) => {
+        const da = `${a.date || ""} ${a.created_at || ""}`;
+        const db = `${b.date || ""} ${b.created_at || ""}`;
+        return da.localeCompare(db);
+      });
+
+      const results: {
+        id: string;
+        lat: number;
+        lng: number;
+        label: string;
+        date?: string;
+      }[] = [];
+      const geoCache: Record<string, { lat: number; lng: number } | null> = {};
+
+      for (const row of sortedRows) {
+        const query = row.location || "";
+        if (!query) continue;
+
+        let coords = geoCache[query];
+
+        if (coords === undefined) {
+          await new Promise((r) => setTimeout(r, 1000));
+          coords = await getLatLng(query);
+          geoCache[query] = coords;
+        }
+
+        if (coords) {
+          results.push({
+            id: row.id,
+            lat: coords.lat,
+            lng: coords.lng,
+            label: row.location || row.campground || "Unknown place",
+            date: row.date,
+          });
+        }
+      }
+
+      if (!cancelled) {
+        setMapPoints(results);
+      }
+    }
+
+    if (filteredRows.length > 0) {
+      loadPoints();
+    } else {
+      setMapPoints([]);
+    }
 
     return () => {
-      urls.forEach((u) => URL.revokeObjectURL(u));
+      cancelled = true;
     };
-  }, [newPhotos]);
+  }, [filteredRows]);
+
+  /** =========================
+   *  cleanup preview urls
+   *  ========================= */
+  useEffect(() => {
+    return () => {
+      newMedia.forEach((item) => URL.revokeObjectURL(item.previewUrl));
+    };
+  }, [newMedia]);
 
   /** =========================
    *  form handlers
@@ -584,11 +651,12 @@ useEffect(() => {
   function resetAll() {
     setEditingId(null);
     setForm(emptyForm());
-    setExistingPhotoUrls([]);
-    setNewPhotos([]);
+    setExistingMediaUrls([]);
+    newMedia.forEach((item) => URL.revokeObjectURL(item.previewUrl));
+    setNewMedia([]);
     setUploadProgress("");
     setMessage("");
-    if (choosePhotosRef.current) choosePhotosRef.current.value = "";
+    if (chooseMediaRef.current) chooseMediaRef.current.value = "";
     if (takePhotoRef.current) takePhotoRef.current.value = "";
   }
 
@@ -609,53 +677,64 @@ useEffect(() => {
       rating: row.rating == null ? "" : String(row.rating),
       notes: row.notes || "",
     });
-    setExistingPhotoUrls(row.photo_urls || []);
-    setNewPhotos([]);
+
+    setExistingMediaUrls(row.photo_urls || []);
+    newMedia.forEach((item) => URL.revokeObjectURL(item.previewUrl));
+    setNewMedia([]);
     setUploadProgress("");
     setMessage("");
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  /** =========================
-   *  trip handlers
-   *  ========================= */
-  async function handleCreateTrip() {
-    const raw = window.prompt("새 trip 이름을 입력하세요.", "");
-    const name = raw?.trim();
+/** =========================
+ *  trip handlers
+ *  ========================= */
+async function handleCreateTrip() {
+  const raw = window.prompt("새 trip 이름을 입력하세요.", "");
+  const name = raw?.trim();
+  const userId = session?.user?.id;
 
-    if (!name) return;
+  if (!name) return;
 
-    if (tripList.includes(name)) {
-      setCurrentTrip(name);
-      setShowTripList(false);
-      setMessage(`이미 있는 trip입니다. 현재 trip을 "${name}"(으)로 바꿨습니다.`);
-      return;
-    }
-
-    try {
-      const { error } = await supabase.from("trips").insert({
-        name,
-        is_public: false,
-        share_slug: null,
-      });
-
-      if (error) throw error;
-
-      setCurrentTrip(name);
-      setEditingId(null);
-      setForm(emptyForm());
-      setExistingPhotoUrls([]);
-      setNewPhotos([]);
-      setShowTripList(false);
-      setMessage(`새 trip 준비 완료: ${name}`);
-    } catch (err: any) {
-      console.error(err);
-      setMessage(`새 trip 생성 오류: ${err?.message || "알 수 없는 오류"}`);
-    }
+  if (!userId) {
+    setMessage("로그인 정보를 찾을 수 없습니다.");
+    return;
   }
 
+  if (tripList.includes(name)) {
+    setCurrentTrip(name);
+    setShowTripList(false);
+    setMessage(`이미 있는 trip입니다. 현재 trip을 "${name}"(으)로 바꿨습니다.`);
+    return;
+  }
+
+  try {
+    const { error } = await supabase.from("trips").insert({
+      user_id: userId,
+      name,
+      is_public: false,
+      share_slug: null,
+    });
+
+    if (error) throw error;
+
+    setCurrentTrip(name);
+    setEditingId(null);
+    setForm(emptyForm());
+    setExistingMediaUrls([]);
+    newMedia.forEach((item) => URL.revokeObjectURL(item.previewUrl));
+    setNewMedia([]);
+    setShowTripList(false);
+    setMessage(`새 trip 준비 완료: ${name}`);
+  } catch (err: any) {
+    console.error(err);
+    setMessage(`새 trip 생성 오류: ${err?.message || "알 수 없는 오류"}`);
+  }
+}
+
 async function handleShareTrip() {
-  if (!currentTrip || !session?.user?.id) return;
+  const userId = session?.user?.id;
+  if (!currentTrip || !userId) return;
 
   setSharingLoading(true);
 
@@ -663,18 +742,17 @@ async function handleShareTrip() {
     let { data: tripRow, error } = await supabase
       .from("trips")
       .select("id, name, share_slug, is_public")
-      .eq("user_id", session.user.id)
+      .eq("user_id", userId)
       .eq("name", currentTrip)
       .maybeSingle();
 
     if (error) throw error;
 
-    // trips 테이블에 없으면 자동 생성
     if (!tripRow) {
       const { data: inserted, error: insertError } = await supabase
         .from("trips")
         .insert({
-          user_id: session.user.id,
+          user_id: userId,
           name: currentTrip,
           is_public: false,
           share_slug: null,
@@ -708,7 +786,8 @@ async function handleShareTrip() {
           share_slug: slug,
           is_public: true,
         })
-        .eq("id", tripRow.id);
+        .eq("id", tripRow.id)
+        .eq("user_id", userId);
 
       if (updateError) throw updateError;
     } else {
@@ -717,7 +796,8 @@ async function handleShareTrip() {
         .update({
           is_public: true,
         })
-        .eq("id", tripRow.id);
+        .eq("id", tripRow.id)
+        .eq("user_id", userId);
 
       if (updateError) throw updateError;
     }
@@ -733,165 +813,198 @@ async function handleShareTrip() {
   }
 }
 
-  async function handleCopyLink() {
-    if (!shareUrl) return;
+async function handleCopyLink() {
+  if (!shareUrl) return;
 
-    try {
-      await navigator.clipboard.writeText(shareUrl);
-      setMessage("링크가 복사되었습니다!");
-    } catch (err: any) {
-      console.error(err);
-      setMessage(`복사 오류: ${err?.message || "알 수 없는 오류"}`);
+  try {
+    await navigator.clipboard.writeText(shareUrl);
+    setMessage("링크가 복사되었습니다!");
+  } catch (err: any) {
+    console.error(err);
+    setMessage(`복사 오류: ${err?.message || "알 수 없는 오류"}`);
+  }
+}
+
+async function handleStopSharing() {
+  const userId = session?.user?.id;
+  if (!currentTrip || !userId) return;
+
+  try {
+    const { data: tripRow, error } = await supabase
+      .from("trips")
+      .select("id")
+      .eq("user_id", userId)
+      .eq("name", currentTrip)
+      .single();
+
+    if (error || !tripRow) {
+      setMessage("Trip 정보를 찾을 수 없습니다.");
+      return;
     }
+
+    const { error: updateError } = await supabase
+      .from("trips")
+      .update({ is_public: false })
+      .eq("id", tripRow.id)
+      .eq("user_id", userId);
+
+    if (updateError) throw updateError;
+
+    setShareUrl("");
+    setMessage("공유 중지 완료");
+  } catch (err: any) {
+    console.error(err);
+    setMessage(`공유 중지 오류: ${err?.message || "알 수 없는 오류"}`);
+  }
+}
+
+async function handleRenameTrip() {
+  const oldTrip = currentTrip.trim();
+  if (!oldTrip) return;
+
+  const raw = window.prompt("새 trip 이름", oldTrip);
+  const newTrip = raw?.trim();
+
+  if (!newTrip || newTrip === oldTrip) return;
+
+  const userId = session?.user?.id;
+  if (!userId) {
+    setMessage("로그인 정보를 찾을 수 없습니다.");
+    return;
   }
 
-  async function handleStopSharing() {
-    if (!currentTrip) return;
+  try {
+    const { error: entryError } = await supabase
+      .from(TABLE)
+      .update({ trip: newTrip })
+      .eq("user_id", userId)
+      .eq("trip", oldTrip);
 
-    try {
-      const { data: tripRow, error } = await supabase
-        .from("trips")
-        .select("id")
-        .eq("name", currentTrip)
-        .single();
+    if (entryError) throw entryError;
 
-      if (error || !tripRow) {
-        setMessage("Trip 정보를 찾을 수 없습니다.");
-        return;
-      }
+    const { error: tripError } = await supabase
+      .from("trips")
+      .update({ name: newTrip })
+      .eq("user_id", userId)
+      .eq("name", oldTrip);
 
-      const { error: updateError } = await supabase
-        .from("trips")
-        .update({ is_public: false })
-        .eq("id", tripRow.id);
+    if (tripError) throw tripError;
 
-      if (updateError) throw updateError;
-
-      setShareUrl("");
-      setMessage("공유 중지 완료");
-    } catch (err: any) {
-      console.error(err);
-      setMessage(`공유 중지 오류: ${err?.message || "알 수 없는 오류"}`);
-    }
-  }
-
-  async function handleRenameTrip() {
-    const oldTrip = currentTrip.trim();
-    if (!oldTrip) return;
-
-    const raw = window.prompt("새 trip 이름", oldTrip);
-    const newTrip = raw?.trim();
-
-    if (!newTrip || newTrip === oldTrip) return;
-
-    const userId = session?.user?.id;
-    if (!userId) return;
-
-    try {
-      const { error: entryError } = await supabase
-        .from(TABLE)
-        .update({ trip: newTrip })
-        .eq("user_id", userId)
-        .eq("trip", oldTrip);
-
-      if (entryError) throw entryError;
-
-      const { error: tripError } = await supabase
-        .from("trips")
-        .update({ name: newTrip })
-        .eq("name", oldTrip);
-
-      if (tripError) throw tripError;
-
-      setRows((prev) =>
-        prev.map((row) =>
-          (row.trip?.trim() || "") === oldTrip ? { ...row, trip: newTrip } : row
-        )
-      );
-      setCurrentTrip(newTrip);
-      setMessage("Trip 이름 변경 완료");
-    } catch (err: any) {
-      console.error(err);
-      setMessage(`Trip 이름 변경 오류: ${err?.message || "알 수 없는 오류"}`);
-    }
-  }
-
-  async function handleDeleteTrip() {
-    const tripToDelete = currentTrip.trim();
-    const userId = session?.user?.id;
-
-    if (!tripToDelete || !userId) return;
-
-    const targetCount = rows.filter(
-      (row) => (row.trip?.trim() || "") === tripToDelete
-    ).length;
-
-    const ok = window.confirm(
-      `"${tripToDelete}" trip의 기록 ${targetCount}개를 모두 삭제할까요?`
+    setRows((prev) =>
+      prev.map((row) =>
+        (row.trip?.trim() || "") === oldTrip ? { ...row, trip: newTrip } : row
+      )
     );
-    if (!ok) return;
-
-    try {
-      const { error: entryError } = await supabase
-        .from(TABLE)
-        .delete()
-        .eq("user_id", userId)
-        .eq("trip", tripToDelete);
-
-      if (entryError) throw entryError;
-
-      const { error: tripError } = await supabase
-        .from("trips")
-        .delete()
-        .eq("name", tripToDelete);
-
-      if (tripError) throw tripError;
-
-      const remainingRows = rows.filter(
-        (row) => (row.trip?.trim() || "") !== tripToDelete
-      );
-      setRows(remainingRows);
-
-      const remainingTrips = Array.from(
-        new Set(
-          remainingRows
-            .map((row) => row.trip?.trim())
-            .filter((trip): trip is string => Boolean(trip))
-        )
-      ).sort((a, b) => a.localeCompare(b));
-
-      setCurrentTrip(remainingTrips[0] || DEFAULT_TRIP);
-      resetAll();
-      setShowTripList(false);
-      setMessage("Trip 삭제 완료");
-    } catch (err: any) {
-      console.error(err);
-      setMessage(`Trip 삭제 오류: ${err?.message || "알 수 없는 오류"}`);
-    }
+    setCurrentTrip(newTrip);
+    setShowTripList(false);
+    setMessage("Trip 이름 변경 완료");
+  } catch (err: any) {
+    console.error(err);
+    setMessage(`Trip 이름 변경 오류: ${err?.message || "알 수 없는 오류"}`);
   }
+}
+
+async function handleDeleteTrip() {
+  const tripToDelete = currentTrip.trim();
+  const userId = session?.user?.id;
+
+  if (!tripToDelete || !userId) return;
+
+  const targetCount = rows.filter(
+    (row) => (row.trip?.trim() || "") === tripToDelete
+  ).length;
+
+  const ok = window.confirm(
+    `"${tripToDelete}" trip의 기록 ${targetCount}개를 모두 삭제할까요?`
+  );
+  if (!ok) return;
+
+  try {
+    const { error: entryError } = await supabase
+      .from(TABLE)
+      .delete()
+      .eq("user_id", userId)
+      .eq("trip", tripToDelete);
+
+    if (entryError) throw entryError;
+
+    const { error: tripError } = await supabase
+      .from("trips")
+      .delete()
+      .eq("user_id", userId)
+      .eq("name", tripToDelete);
+
+    if (tripError) throw tripError;
+
+    const remainingRows = rows.filter(
+      (row) => (row.trip?.trim() || "") !== tripToDelete
+    );
+    setRows(remainingRows);
+
+    const remainingTrips = Array.from(
+      new Set(
+        remainingRows
+          .map((row) => row.trip?.trim())
+          .filter((trip): trip is string => Boolean(trip))
+      )
+    ).sort((a, b) => a.localeCompare(b));
+
+    setCurrentTrip(remainingTrips[0] || DEFAULT_TRIP);
+    resetAll();
+    setShowTripList(false);
+    setMessage("Trip 삭제 완료");
+  } catch (err: any) {
+    console.error(err);
+    setMessage(`Trip 삭제 오류: ${err?.message || "알 수 없는 오류"}`);
+  }
+}
 
   /** =========================
-   *  photo pickers
+   *  media pickers
    *  ========================= */
-  async function handleChoosePhotos(e: ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(e.target.files || []);
+  async function handleChooseMedia(e: ChangeEvent<HTMLInputElement>) {
+  const files = Array.from(e.target.files || []).sort(
+  (a, b) => a.lastModified - b.lastModified
+);
     if (!files.length) return;
 
-    setMessage("사진 압축 중...");
+    const MAX_VIDEO_SIZE = 300 * 1024 * 1024; // 300MB
+    const nextItems: PendingMediaItem[] = [];
 
     try {
-      const compressed: File[] = [];
-      for (let i = 0; i < files.length; i += 1) {
-        const c = await compressImage(files[i]);
-        compressed.push(c);
+      for (const file of files) {
+        if (isImageFile(file)) {
+          setMessage("사진 압축 중...");
+          const compressed = await compressImage(file);
+          nextItems.push({
+            file: compressed,
+            previewUrl: URL.createObjectURL(compressed),
+            type: "image",
+          });
+        } else if (isVideoFile(file)) {
+          if (file.size > MAX_VIDEO_SIZE) {
+            throw new Error(
+              `동영상 용량이 너무 큽니다: ${file.name} (${formatFileSize(
+                file.size
+              )}). 300MB 이하로 먼저 테스트해 주세요.`
+            );
+          }
+          nextItems.push({
+            file,
+            previewUrl: URL.createObjectURL(file),
+            type: "video",
+          });
+        }
       }
-      setNewPhotos((prev) => [...prev, ...compressed]);
-      setMessage(`${compressed.length}장 추가 완료`);
+
+      setNewMedia((prev) => [...prev, ...nextItems]);
+      setMessage(`${nextItems.length}개 미디어 추가 완료`);
     } catch (err: any) {
+      nextItems.forEach((item) => URL.revokeObjectURL(item.previewUrl));
       console.error(err);
-      setMessage(`사진 준비 오류: ${err?.message || "알 수 없는 오류"}`);
+      setMessage(`미디어 준비 오류: ${err?.message || "알 수 없는 오류"}`);
     } finally {
-      if (choosePhotosRef.current) choosePhotosRef.current.value = "";
+      if (chooseMediaRef.current) chooseMediaRef.current.value = "";
     }
   }
 
@@ -903,7 +1016,12 @@ async function handleShareTrip() {
 
     try {
       const compressed = await compressImage(file);
-      setNewPhotos((prev) => [...prev, compressed]);
+      const item: PendingMediaItem = {
+        file: compressed,
+        previewUrl: URL.createObjectURL(compressed),
+        type: "image",
+      };
+      setNewMedia((prev) => [...prev, item]);
       setMessage("사진 1장 추가 완료");
     } catch (err: any) {
       console.error(err);
@@ -913,12 +1031,16 @@ async function handleShareTrip() {
     }
   }
 
-  function removePendingPhoto(index: number) {
-    setNewPhotos((prev) => prev.filter((_, i) => i !== index));
+  function removePendingMedia(index: number) {
+    setNewMedia((prev) => {
+      const target = prev[index];
+      if (target) URL.revokeObjectURL(target.previewUrl);
+      return prev.filter((_, i) => i !== index);
+    });
   }
 
-  function removeExistingPhoto(index: number) {
-    setExistingPhotoUrls((prev) => prev.filter((_, i) => i !== index));
+  function removeExistingMedia(index: number) {
+    setExistingMediaUrls((prev) => prev.filter((_, i) => i !== index));
   }
 
   /** =========================
@@ -995,14 +1117,18 @@ async function handleShareTrip() {
     try {
       const uploadedUrls: string[] = [];
 
-      for (let i = 0; i < newPhotos.length; i += 1) {
-        const file = newPhotos[i];
-        setUploadProgress(`사진 업로드 중 (${i + 1}/${newPhotos.length})`);
-        const { publicUrl } = await uploadOnePhoto(userId, file);
+      for (let i = 0; i < newMedia.length; i += 1) {
+        const item = newMedia[i];
+        setUploadProgress(
+          `${item.type === "video" ? "동영상" : "사진"} 업로드 중 (${i + 1}/${
+            newMedia.length
+          })`
+        );
+        const { publicUrl } = await uploadOneMedia(userId, item.file);
         uploadedUrls.push(publicUrl);
       }
 
-      const finalPhotoUrls = [...existingPhotoUrls, ...uploadedUrls];
+      const finalMediaUrls = [...existingMediaUrls, ...uploadedUrls];
 
       const payload = {
         user_id: userId,
@@ -1016,7 +1142,7 @@ async function handleShareTrip() {
         noise: toNullable(form.noise),
         rating: toNullableNumber(form.rating),
         notes: toNullable(form.notes),
-        photo_urls: finalPhotoUrls,
+        photo_urls: finalMediaUrls,
       };
 
       if (editingId) {
@@ -1154,6 +1280,21 @@ async function handleShareTrip() {
     fontSize: 13,
   };
 
+  const viewerNavBtn: CSSProperties = {
+    position: "absolute",
+    top: "50%",
+    transform: "translateY(-50%)",
+    zIndex: 10001,
+    background: "rgba(0,0,0,0.65)",
+    color: "#fff",
+    border: "1px solid rgba(255,255,255,0.2)",
+    borderRadius: 12,
+    padding: "10px 14px",
+    fontSize: 24,
+    fontWeight: 700,
+    cursor: "pointer",
+  };
+
   /** =========================
    *  render - auth checking
    *  ========================= */
@@ -1233,9 +1374,10 @@ async function handleShareTrip() {
    *  render - main
    *  ========================= */
   const mapCenter: [number, number] =
-  mapPoints.length > 0
-    ? [Number(mapPoints[0].lat), Number(mapPoints[0].lng)]
-    : [33.749, -84.388];
+    mapPoints.length > 0
+      ? [Number(mapPoints[0].lat), Number(mapPoints[0].lng)]
+      : [33.749, -84.388];
+
   return (
     <div style={page}>
       <div style={card}>
@@ -1314,57 +1456,62 @@ async function handleShareTrip() {
             <h3 style={{ marginTop: 0, marginBottom: 8 }}>Current Trip</h3>
             <div style={{ fontSize: 18, fontWeight: 700 }}>{currentTrip}</div>
             <div style={{ color: "#6b7280", fontSize: 13, marginTop: 6 }}>
-              Entries: {filteredRows.length} · Photos: {currentTripPhotoCount}
+              Entries: {filteredRows.length} · Media: {currentTripMediaCount}
             </div>
-<div style={{ marginTop: 12 }}>
-  <button
-    type="button"
-    onClick={() => setShowMap((prev) => !prev)}
-    style={{
-      padding: "8px 14px",
-      borderRadius: 12,
-      border: "1px solid #d1d5db",
-      background: "#ffffff",
-      fontSize: 15,
-      fontWeight: 600,
-      cursor: "pointer",
-    }}
-  >
-    {showMap ? "Map 숨기기 ▲" : "Map 보기 ▼"}
-  </button>
-</div>
-{showMap && (
-  <div
-    style={{
-      marginTop: 12,
-      marginLeft: -16,
-      marginRight: -90,
-      width: "calc(100% + 106px)",
-    }}
-  >
-<TripMap
-  key={mapPoints.map((p) => `${p.lat},${p.lng}`).join("|")}
-  points={mapPoints}
-  onPointClick={(id) => {
-    const el = entryRefs.current[id];
-    if (!el) return;
 
-    el.scrollIntoView({
-      behavior: "smooth",
-      block: "center",
-    });
+            <div style={{ marginTop: 12 }}>
+              <button
+                type="button"
+                onClick={() => setShowMap((prev) => !prev)}
+                style={{
+                  padding: "8px 14px",
+                  borderRadius: 12,
+                  border: "1px solid #d1d5db",
+                  background: "#ffffff",
+                  fontSize: 15,
+                  fontWeight: 600,
+                  cursor: "pointer",
+                }}
+              >
+                {showMap ? "Map 숨기기 ▲" : "Map 보기 ▼"}
+              </button>
+            </div>
 
-    el.style.outline = "3px solid #60a5fa";
-    el.style.outlineOffset = "4px";
+            {showMap && (
+              <div
+                style={{
+                  marginTop: 12,
+                  marginLeft: -16,
+                  marginRight: -90,
+                  width: "calc(100% + 106px)",
+                }}
+              >
+                <TripMap
+                  key={mapPoints.map((p) => `${p.lat},${p.lng}`).join("|")}
+                  points={mapPoints}
+                  onPointClick={(id) => {
+                    const el = entryRefs.current[id];
+                    if (!el) return;
 
-    setTimeout(() => {
-      el.style.outline = "";
-      el.style.outlineOffset = "";
-    }, 1500);
-  }}
-/>
-  </div>
-)}
+                    el.scrollIntoView({
+                      behavior: "smooth",
+                      block: "center",
+                    });
+
+                    el.style.outline = "3px solid #60a5fa";
+                    el.style.outlineOffset = "4px";
+
+                    setTimeout(() => {
+                      el.style.outline = "";
+                      el.style.outlineOffset = "";
+                    }, 1500);
+                  }}
+                  currentLocation={currentLocation}
+                 
+                />
+              </div>
+            )}
+
             <div style={{ marginTop: 10 }}>
               <button
                 type="button"
@@ -1578,15 +1725,15 @@ async function handleShareTrip() {
 
         <div>
           <div style={{ ...label, marginBottom: 8 }}>
-            Photos ({totalPhotoCount})
+            Media ({totalMediaCount})
           </div>
 
           <input
-            ref={choosePhotosRef}
+            ref={chooseMediaRef}
             type="file"
-            accept="image/*"
+            accept="*/*"
             multiple
-            onChange={handleChoosePhotos}
+            onChange={handleChooseMedia}
             style={{ display: "none" }}
           />
 
@@ -1603,10 +1750,10 @@ async function handleShareTrip() {
             <button
               type="button"
               style={btn}
-              onClick={() => choosePhotosRef.current?.click()}
+              onClick={() => chooseMediaRef.current?.click()}
               disabled={saving}
             >
-              Choose Photos
+              Choose Photos / Videos
             </button>
 
             <button
@@ -1619,10 +1766,15 @@ async function handleShareTrip() {
             </button>
           </div>
 
-          {!!existingPhotoUrls.length && (
+          <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 12 }}>
+            GoPro 동영상은 먼저 짧은 MP4 한두 개로 테스트해 보세요. 너무 큰 MOV 파일은
+            모바일 업로드가 실패할 수 있습니다.
+          </div>
+
+          {!!existingMediaUrls.length && (
             <div style={{ marginBottom: 12 }}>
               <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>
-                기존 사진
+                기존 미디어
               </div>
               <div
                 style={{
@@ -1631,40 +1783,67 @@ async function handleShareTrip() {
                   gap: 10,
                 }}
               >
-                {existingPhotoUrls.map((url, i) => (
-                  <div
-                    key={`${url}-${i}`}
-                    style={{ border: "1px solid #e5e7eb", borderRadius: 12, padding: 8 }}
-                  >
-                    <img
-                      src={url}
-                      alt={`existing-${i}`}
-                      style={{
-                        width: "100%",
-                        aspectRatio: "1 / 1",
-                        objectFit: "cover",
-                        borderRadius: 8,
-                        cursor: "pointer",
-                      }}
-                      onClick={() => setViewerImage(url)}
-                    />
-                    <button
-                      type="button"
-                      style={{ ...smallBtn, marginTop: 8, width: "100%" }}
-                      onClick={() => removeExistingPhoto(i)}
+                {existingMediaUrls.map((url, i) => {
+                  const type = mediaTypeFromUrl(url);
+                  const items = existingMediaUrls.map((u) => ({
+                    url: u,
+                    type: mediaTypeFromUrl(u),
+                  })) as ViewerItem[];
+
+                  return (
+                    <div
+                      key={`${url}-${i}`}
+                      style={{ border: "1px solid #e5e7eb", borderRadius: 12, padding: 8 }}
                     >
-                      제거
-                    </button>
-                  </div>
-                ))}
+{type === "video" ? (
+  <video
+    src={url}
+    muted
+    playsInline
+    preload="metadata"
+    onClick={() => openViewer(items, i)}
+    style={{
+      width: "100%",
+      aspectRatio: "1 / 1",
+      objectFit: "cover",
+      borderRadius: 8,
+      cursor: "pointer",
+      background: "#000",
+    }}
+  />
+) : (
+                        <img
+                          src={url}
+                          alt={`existing-${i}`}
+                          style={{
+                            width: "100%",
+                            aspectRatio: "1 / 1",
+                            objectFit: "cover",
+                            borderRadius: 8,
+                            cursor: "pointer",
+                          }}
+                          onClick={() => openViewer(items, i)}
+                        />
+                      )}
+
+                      <button
+                        type="button"
+                        style={{ ...smallBtn, marginTop: 8, width: "100%" }}
+                        onClick={() => removeExistingMedia(i)}
+                      >
+                        제거
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
 
-          {!!newPhotoPreviews.length && (
+          {!!newMedia.length && (
             <div style={{ marginBottom: 12 }}>
               <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>
-                새로 추가할 사진
+                새로 추가할 미디어
               </div>
               <div
                 style={{
@@ -1673,42 +1852,80 @@ async function handleShareTrip() {
                   gap: 10,
                 }}
               >
-                {newPhotoPreviews.map((url, i) => (
-                  <div
-                    key={`${url}-${i}`}
-                    style={{ border: "1px solid #e5e7eb", borderRadius: 12, padding: 8 }}
-                  >
-                    <img
-                      src={url}
-                      alt={`new-${i}`}
-                      style={{
-                        width: "100%",
-                        aspectRatio: "1 / 1",
-                        objectFit: "cover",
-                        borderRadius: 8,
-                        cursor: "pointer",
-                      }}
-                      onClick={() => setPreviewUrl(url)}
-                    />
+                {newMedia.map((item, i) => {
+                  const items = newMedia.map((m) => ({
+                    url: m.previewUrl,
+                    type: m.type,
+                    label: m.file.name,
+                  })) as ViewerItem[];
+
+                  return (
                     <div
-                      style={{
-                        marginTop: 6,
-                        fontSize: 12,
-                        color: "#6b7280",
-                        wordBreak: "break-all",
-                      }}
+                      key={`${item.previewUrl}-${i}`}
+                      style={{ border: "1px solid #e5e7eb", borderRadius: 12, padding: 8 }}
                     >
-                      {newPhotos[i]?.name}
+                      {item.type === "video" ? (
+                        <div
+                          onClick={() => openViewer(items, i)}
+                          style={{
+                            width: "100%",
+                            aspectRatio: "1 / 1",
+                            borderRadius: 8,
+                            background: "#111827",
+                            color: "#fff",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            cursor: "pointer",
+                            fontWeight: 700,
+                            fontSize: 14,
+                            textAlign: "center",
+                            padding: 8,
+                            boxSizing: "border-box",
+                          }}
+                        >
+                          ▶ VIDEO
+                        </div>
+                      ) : (
+                        <img
+                          src={item.previewUrl}
+                          alt={`new-${i}`}
+                          style={{
+                            width: "100%",
+                            aspectRatio: "1 / 1",
+                            objectFit: "cover",
+                            borderRadius: 8,
+                            cursor: "pointer",
+                          }}
+                          onClick={() => openViewer(items, i)}
+                        />
+                      )}
+
+                      <div
+                        style={{
+                          marginTop: 6,
+                          fontSize: 12,
+                          color: "#6b7280",
+                          wordBreak: "break-all",
+                        }}
+                      >
+                        {item.file.name}
+                      </div>
+                      <div style={{ marginTop: 4, fontSize: 12, color: "#6b7280" }}>
+                        {item.type === "video" ? "동영상" : "사진"} ·{" "}
+                        {formatFileSize(item.file.size)}
+                      </div>
+
+                      <button
+                        type="button"
+                        style={{ ...smallBtn, marginTop: 8, width: "100%" }}
+                        onClick={() => removePendingMedia(i)}
+                      >
+                        제거
+                      </button>
                     </div>
-                    <button
-                      type="button"
-                      style={{ ...smallBtn, marginTop: 8, width: "100%" }}
-                      onClick={() => removePendingPhoto(i)}
-                    >
-                      제거
-                    </button>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
@@ -1745,160 +1962,255 @@ async function handleShareTrip() {
           <div style={{ color: "#6b7280" }}>이 trip에는 아직 기록이 없습니다.</div>
         ) : (
           <div style={{ display: "grid", gap: 12 }}>
-{[...filteredRows]
-  .sort((a, b) => a.date.localeCompare(b.date))   // 최신순
-  .map((row) => (
-  <div
-    key={row.id}
-    ref={(el) => {
-      entryRefs.current[row.id] = el;
-    }}
-    style={{
-                  border: "1px solid #e5e7eb",
-                  borderRadius: 14,
-                  padding: 12,
-                  background: "#fff",
-                }}
-              >
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    gap: 10,
-                    alignItems: "flex-start",
-                    flexWrap: "wrap",
-                  }}
-                >
-                  <div>
-                    <div style={{ fontWeight: 700, fontSize: 16 }}>
-                      {row.date} {row.location ? `· ${row.location}` : ""}
-                    </div>
-                    <div style={{ marginTop: 4, color: "#6b7280", fontSize: 13 }}>
-                      {row.trip || ""} {row.campground ? `· ${row.campground}` : ""}
-                      {row.site ? ` · Site/Room ${row.site}` : ""}
-                    </div>
-                  </div>
+            {[...filteredRows]
+              .sort((a, b) => a.date.localeCompare(b.date))
+              .map((row) => {
+                const mediaItems: ViewerItem[] = (row.photo_urls || []).map((url) => ({
+                  url,
+                  type: mediaTypeFromUrl(url),
+                  label: row.location || row.campground || row.date,
+                }));
 
-                  <div style={{ display: "flex", gap: 8 }}>
-                    <button type="button" style={smallBtn} onClick={() => startEdit(row)}>
-                      Edit
-                    </button>
-                    <button
-                      type="button"
-                      style={{
-                        ...smallBtn,
-                        background: "#fff1f2",
-                        color: "#be123c",
-                        border: "1px solid #fecdd3",
-                      }}
-                      onClick={() => deleteEntry(row.id)}
-                    >
-                      Delete
-                    </button>
-                  </div>
-                </div>
-
-                {(row.water || row.bathroom || row.noise || row.rating != null) && (
-                  <div style={{ marginTop: 8, color: "#374151", fontSize: 14 }}>
-                    {row.water ? `Amenities: ${row.water}  ` : ""}
-                    {row.bathroom ? `Cleanliness: ${row.bathroom}  ` : ""}
-                    {row.noise ? `Quiteness: ${row.noise}  ` : ""}
-                    {row.rating != null ? `Rating: ${row.rating}` : ""}
-                  </div>
-                )}
-
-                {row.notes && (
-                  <div style={{ marginTop: 10, whiteSpace: "pre-wrap", lineHeight: 1.45 }}>
-                    {row.notes}
-                  </div>
-                )}
-
-                {!!row.photo_urls?.length && (
+                return (
                   <div
+                    key={row.id}
+                    ref={(el) => {
+                      entryRefs.current[row.id] = el;
+                    }}
                     style={{
-                      display: "grid",
-                      gridTemplateColumns: "repeat(auto-fill, minmax(90px, 1fr))",
-                      gap: 8,
-                      marginTop: 12,
+                      border: "1px solid #e5e7eb",
+                      borderRadius: 14,
+                      padding: 12,
+                      background: "#fff",
                     }}
                   >
-                    {row.photo_urls.map((url, idx) => (
-                      <img
-                        key={`${url}-${idx}`}
-                        src={url}
-                        alt={`row-${idx}`}
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        gap: 10,
+                        alignItems: "flex-start",
+                        flexWrap: "wrap",
+                      }}
+                    >
+                      <div>
+                        <div style={{ fontWeight: 700, fontSize: 16 }}>
+                          {row.date} {row.location ? `· ${row.location}` : ""}
+                        </div>
+                        <div style={{ marginTop: 4, color: "#6b7280", fontSize: 13 }}>
+                          {row.trip || ""} {row.campground ? `· ${row.campground}` : ""}
+                          {row.site ? ` · Site/Room ${row.site}` : ""}
+                        </div>
+                      </div>
+
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <button type="button" style={smallBtn} onClick={() => startEdit(row)}>
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          style={{
+                            ...smallBtn,
+                            background: "#fff1f2",
+                            color: "#be123c",
+                            border: "1px solid #fecdd3",
+                          }}
+                          onClick={() => deleteEntry(row.id)}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+
+                    {(row.water || row.bathroom || row.noise || row.rating != null) && (
+                      <div style={{ marginTop: 8, color: "#374151", fontSize: 14 }}>
+                        {row.water ? `Amenities: ${row.water}  ` : ""}
+                        {row.bathroom ? `Cleanliness: ${row.bathroom}  ` : ""}
+                        {row.noise ? `Quiteness: ${row.noise}  ` : ""}
+                        {row.rating != null ? `Rating: ${row.rating}` : ""}
+                      </div>
+                    )}
+
+                    {row.notes && (
+                      <div style={{ marginTop: 10, whiteSpace: "pre-wrap", lineHeight: 1.45 }}>
+                        {row.notes}
+                      </div>
+                    )}
+
+                    {!!row.photo_urls?.length && (
+                      <div
                         style={{
-                          width: "100%",
-                          aspectRatio: "1 / 1",
-                          objectFit: "cover",
-                          borderRadius: 10,
-                          border: "1px solid #e5e7eb",
-                          cursor: "pointer",
+                          display: "grid",
+                          gridTemplateColumns: "repeat(auto-fill, minmax(90px, 1fr))",
+                          gap: 8,
+                          marginTop: 12,
                         }}
-                        onClick={() => setPreviewUrl(url)}
-                      />
-                    ))}
+                      >
+                        {row.photo_urls.map((url, idx) => {
+                          const type = mediaTypeFromUrl(url);
+
+return type === "video" ? (
+  <video
+    key={`${url}-${idx}`}
+    src={url}
+    muted
+    playsInline
+    preload="metadata"
+    onClick={() => openViewer(mediaItems, idx)}
+    style={{
+      width: "100%",
+      aspectRatio: "1 / 1",
+      objectFit: "cover",
+      borderRadius: 10,
+      border: "1px solid #e5e7eb",
+      cursor: "pointer",
+      background: "#000",
+    }}
+  />
+) : (
+                            <img
+                              key={`${url}-${idx}`}
+                              src={url}
+                              alt={`row-${idx}`}
+                              style={{
+                                width: "100%",
+                                aspectRatio: "1 / 1",
+                                objectFit: "cover",
+                                borderRadius: 10,
+                                border: "1px solid #e5e7eb",
+                                cursor: "pointer",
+                              }}
+                              onClick={() => openViewer(mediaItems, idx)}
+                            />
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
-            ))}
+                );
+              })}
           </div>
         )}
       </div>
 
-{previewUrl && (
-  <div
-    onClick={() => setPreviewUrl(null)}
-    style={{
-      position: "fixed",
-      inset: 0,
-      background: "rgba(0,0,0,0.85)",
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-      padding: 16,
-      zIndex: 9999,
-      cursor: "zoom-out",
-    }}
-  >
-    <button
-      type="button"
-      onClick={(e) => {
-        e.stopPropagation();
-        setPreviewUrl(null);
-      }}
-      style={{
-        position: "absolute",
-        top: 16,
-        right: 16,
-        zIndex: 10000,
-        background: "rgba(0,0,0,0.7)",
-        color: "#fff",
-        border: "1px solid rgba(255,255,255,0.25)",
-        borderRadius: 10,
-        padding: "8px 12px",
-        fontSize: 16,
-        fontWeight: 700,
-        cursor: "pointer",
-      }}
-    >
-      ✕ 닫기
-    </button>
+      {viewerOpen && currentViewerItem && (
+        <div
+          onClick={closeViewer}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.88)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 16,
+            zIndex: 9999,
+          }}
+        >
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              closeViewer();
+            }}
+            style={{
+              position: "absolute",
+              top: 16,
+              right: 16,
+              zIndex: 10002,
+              background: "rgba(0,0,0,0.7)",
+              color: "#fff",
+              border: "1px solid rgba(255,255,255,0.25)",
+              borderRadius: 10,
+              padding: "8px 12px",
+              fontSize: 16,
+              fontWeight: 700,
+              cursor: "pointer",
+            }}
+          >
+            ✕ 닫기
+          </button>
 
-    <img
-      src={previewUrl}
-      alt="preview"
-      onClick={(e) => e.stopPropagation()}
-      style={{
-        maxWidth: "100%",
-        maxHeight: "100%",
-        borderRadius: 12,
-        objectFit: "contain",
-        boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
-      }}
-    />
-  </div>
-)}
+          {viewerItems.length > 1 && (
+            <>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  goPrevViewer();
+                }}
+                style={{ ...viewerNavBtn, left: 16 }}
+              >
+                ‹
+              </button>
+
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  goNextViewer();
+                }}
+                style={{ ...viewerNavBtn, right: 16 }}
+              >
+                ›
+              </button>
+            </>
+          )}
+
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: "100%",
+              maxWidth: 1200,
+              maxHeight: "100%",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 12,
+            }}
+          >
+            <div style={{ color: "#fff", fontSize: 14, fontWeight: 600 }}>
+              {viewerIndex + 1} / {viewerItems.length}
+              {currentViewerItem.label ? ` · ${currentViewerItem.label}` : ""}
+            </div>
+
+            {currentViewerItem.type === "video" ? (
+              <video
+                src={currentViewerItem.url}
+                controls
+                autoPlay
+                playsInline
+                style={{
+                  maxWidth: "100%",
+                  maxHeight: "calc(100vh - 140px)",
+                  borderRadius: 12,
+                  background: "#000",
+                  boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
+                }}
+              />
+            ) : (
+              <img
+                src={currentViewerItem.url}
+                alt="viewer"
+                style={{
+                  maxWidth: "100%",
+                  maxHeight: "calc(100vh - 140px)",
+                  borderRadius: 12,
+                  objectFit: "contain",
+                  boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
+                }}
+              />
+            )}
+
+            {viewerItems.length > 1 && (
+              <div style={{ color: "#d1d5db", fontSize: 13 }}>
+                키보드 ← / → 로도 넘길 수 있습니다
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
