@@ -1852,7 +1852,7 @@ type === "video" ? (
                       >
                         제거
                       </button>
-                    </div>
+                      </div>
                   );
                 })}
               </div>
