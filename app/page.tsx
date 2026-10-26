@@ -1815,7 +1815,7 @@ async function handleDeleteTrip() {
     ▶ Google Drive Video
   </button>
 ) : (
-{type === "video" ? (
+type === "video" ? (
   <video
     src={url}
     muted
