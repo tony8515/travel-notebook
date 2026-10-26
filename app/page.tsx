@@ -1844,7 +1844,7 @@ type === "video" ? (
                           }}
                           onClick={() => openViewer(items, i)}
                         />
-                      )}
+                      ))}
                       <button
                         type="button"
                         style={{ ...smallBtn, marginTop: 8, width: "100%" }}
