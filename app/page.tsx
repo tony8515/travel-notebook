@@ -140,7 +140,22 @@ function isImageFile(file: File) {
 }
 
 function isVideoFile(file: File) {
-  return file.type.startsWith("video/");
+  // Some phones/browsers provide an empty or generic MIME type for video files.
+  return file.type.startsWith("video/") || /\.(mp4|mov|m4v|webm|ogg|avi|mkv|3gp)$/i.test(file.name);
+}
+
+// Only accept individual Google Drive files; no arbitrary external media URLs.
+function normalizeDriveVideoUrl(raw: string): string | null {
+  try {
+    const url = new URL(raw.trim());
+    if (url.protocol !== "https:" || url.hostname !== "drive.google.com") return null;
+    const fileMatch = url.pathname.match(/^\/file\/d\/([A-Za-z0-9_-]{10,})(?:\/|$)/);
+    const id = fileMatch?.[1] || (url.pathname === "/open" ? url.searchParams.get("id") : null);
+    if (!id || !/^[A-Za-z0-9_-]{10,}$/.test(id)) return null;
+    return `https://drive.google.com/file/d/${id}/view`;
+  } catch {
+    return null;
+  }
 }
 
 function isVideoUrl(url: string) {
@@ -239,6 +254,11 @@ async function uploadOneMedia(
   userId: string,
   file: File
 ): Promise<{ path: string; publicUrl: string }> {
+  // Enforce the storage policy at the actual upload boundary, not just in the UI.
+  // Only the JPEG output of compressImage() may go to Supabase Storage.
+  if (file.type !== "image/jpeg") {
+    throw new Error("Supabase에는 자동 압축한 JPEG 사진만 업로드합니다. 동영상은 Google Drive 링크로 추가하세요.");
+  }
   const path = makePhotoPath(userId, file.name);
 
   const uploadPromise = supabase.storage
@@ -326,6 +346,7 @@ export default function TravelPage() {
 
   const [existingMediaUrls, setExistingMediaUrls] = useState<string[]>([]);
   const [newMedia, setNewMedia] = useState<PendingMediaItem[]>([]);
+  const [driveVideoInput, setDriveVideoInput] = useState("");
 
   /** viewer */
   const [viewerOpen, setViewerOpen] = useState(false);
@@ -657,6 +678,7 @@ export default function TravelPage() {
     setExistingMediaUrls([]);
     newMedia.forEach((item) => URL.revokeObjectURL(item.previewUrl));
     setNewMedia([]);
+    setDriveVideoInput("");
     setUploadProgress("");
     setMessage("");
     if (chooseMediaRef.current) chooseMediaRef.current.value = "";
@@ -684,6 +706,7 @@ export default function TravelPage() {
     setExistingMediaUrls(row.photo_urls || []);
     newMedia.forEach((item) => URL.revokeObjectURL(item.previewUrl));
     setNewMedia([]);
+    setDriveVideoInput("");
     setUploadProgress("");
     setMessage("");
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -965,14 +988,31 @@ async function handleDeleteTrip() {
   /** =========================
    *  media pickers
    *  ========================= */
+  // Add one Drive video to the current new/edit entry. Saved on Save, never uploaded.
+  function handleAddDriveVideo() {
+    const normalized = normalizeDriveVideoUrl(driveVideoInput);
+    if (!normalized) {
+      setMessage("Google Drive 개별 동영상 공유 링크를 입력해 주세요. (drive.google.com/file/d/...)");
+      return;
+    }
+    if (existingMediaUrls.some((url) => normalizeDriveVideoUrl(url) === normalized)) {
+      setMessage("이 동영상 링크는 이미 해당 기록에 있습니다.");
+      return;
+    }
+    setExistingMediaUrls((prev) => [...prev, normalized]);
+    setDriveVideoInput("");
+    setMessage("Google Drive 링크가 추가되었습니다. 아래 Save를 눌러 저장해 주세요.");
+  }
+
   async function handleChooseMedia(e: ChangeEvent<HTMLInputElement>) {
-  const files = Array.from(e.target.files || []).sort(
-  (a, b) => a.lastModified - b.lastModified
-);
+    const files = Array.from(e.target.files || []).sort(
+      (a, b) => a.lastModified - b.lastModified
+    );
     if (!files.length) return;
 
-    const MAX_VIDEO_SIZE = 300 * 1024 * 1024; // 300MB
     const nextItems: PendingMediaItem[] = [];
+    const rejectedVideos: string[] = [];
+    const unsupportedFiles: string[] = [];
 
     try {
       for (const file of files) {
@@ -985,23 +1025,25 @@ async function handleDeleteTrip() {
             type: "image",
           });
         } else if (isVideoFile(file)) {
-          if (file.size > MAX_VIDEO_SIZE) {
-            throw new Error(
-              `동영상 용량이 너무 큽니다: ${file.name} (${formatFileSize(
-                file.size
-              )}). 300MB 이하로 먼저 테스트해 주세요.`
-            );
-          }
-          nextItems.push({
-            file,
-            previewUrl: URL.createObjectURL(file),
-            type: "video",
-          });
+          // Important: selecting a video must NEVER create a Supabase upload item.
+          rejectedVideos.push(file.name);
+        } else {
+          unsupportedFiles.push(file.name);
         }
       }
 
-      setNewMedia((prev) => [...prev, ...nextItems]);
-      setMessage(`${nextItems.length}개 미디어 추가 완료`);
+      if (nextItems.length) {
+        setNewMedia((prev) => [...prev, ...nextItems]);
+      }
+      if (rejectedVideos.length || unsupportedFiles.length) {
+        setMessage(
+          `사진 ${nextItems.length}개 자동 압축 완료. ` +
+          (rejectedVideos.length ? `동영상 ${rejectedVideos.length}개는 Supabase에 업로드하지 않습니다. Google Drive에 넣고 아래에 파일 링크를 추가하세요. ` : "") +
+          (unsupportedFiles.length ? `지원하지 않는 파일 ${unsupportedFiles.length}개는 제외했습니다.` : "")
+        );
+      } else {
+        setMessage(`사진 ${nextItems.length}개 자동 압축 완료`);
+      }
     } catch (err: any) {
       nextItems.forEach((item) => URL.revokeObjectURL(item.previewUrl));
       console.error(err);
@@ -1734,7 +1776,7 @@ async function handleDeleteTrip() {
           <input
             ref={chooseMediaRef}
             type="file"
-            accept="*/*"
+            accept="image/*"
             multiple
             onChange={handleChooseMedia}
             style={{ display: "none" }}
@@ -1756,7 +1798,7 @@ async function handleDeleteTrip() {
               onClick={() => chooseMediaRef.current?.click()}
               disabled={saving}
             >
-              Choose Photos / Videos
+              Choose Photos
             </button>
 
             <button
@@ -1770,8 +1812,39 @@ async function handleDeleteTrip() {
           </div>
 
           <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 12 }}>
-            GoPro 동영상은 먼저 짧은 MP4 한두 개로 테스트해 보세요. 너무 큰 MOV 파일은
-            모바일 업로드가 실패할 수 있습니다.
+            사진은 1,600px 이하 JPEG(품질 82%)로 자동 압축하여 Supabase에 저장합니다.
+            동영상은 Google Drive에 직접 올린 다음 아래에 동영상 공유 링크를 추가해 주세요.
+            (Supabase에 동영상은 업로드하지 않습니다.)
+          </div>
+
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+            <input
+              type="url"
+              aria-label="Google Drive 동영상 공유 링크"
+              placeholder="https://drive.google.com/file/d/.../view"
+              value={driveVideoInput}
+              onChange={(e) => setDriveVideoInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  handleAddDriveVideo();
+                }
+              }}
+              disabled={saving}
+              style={{ flex: "1 1 280px", minWidth: 0, padding: 10, border: "1px solid #d1d5db", borderRadius: 10 }}
+            />
+            <button
+              type="button"
+              onClick={handleAddDriveVideo}
+              style={smallBtn}
+              disabled={saving}
+            >
+              Google Drive 영상 링크 추가
+            </button>
+          </div>
+          <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 12 }}>
+            가족에게 공유하려면 해당 Google Drive 파일의 보기 권한을 설정하세요.
+            링크 추가 후 아래 Save 버튼을 눌러야 여행 기록에 저장됩니다.
           </div>
 
           {!!existingMediaUrls.length && (
