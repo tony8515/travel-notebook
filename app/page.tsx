@@ -144,7 +144,10 @@ function isVideoFile(file: File) {
 }
 
 function isVideoUrl(url: string) {
-  return /\.(mp4|mov|m4v|webm|ogg)$/i.test(url.split("?")[0]);
+  return (
+    /\.(mp4|mov|m4v|webm|ogg)$/i.test(url.split("?")[0]) ||
+    /drive\.google\.com\/file\/d\//i.test(url)
+  );
 }
 
 function mediaTypeFromUrl(url: string): "image" | "video" {
@@ -1795,6 +1798,23 @@ async function handleDeleteTrip() {
                       key={`${url}-${i}`}
                       style={{ border: "1px solid #e5e7eb", borderRadius: 12, padding: 8 }}
                     >
+                      {/drive\.google\.com\/file\/d\//i.test(url) ? (
+  <button
+    type="button"
+    onClick={() => openViewer(items, i)}
+    style={{
+      width: "100%",
+      aspectRatio: "1 / 1",
+      borderRadius: 8,
+      border: 0,
+      background: "#222",
+      color: "white",
+      cursor: "pointer",
+    }}
+  >
+    ▶ Google Drive Video
+  </button>
+) : (
 {type === "video" ? (
   <video
     src={url}
@@ -1825,7 +1845,6 @@ async function handleDeleteTrip() {
                           onClick={() => openViewer(items, i)}
                         />
                       )}
-
                       <button
                         type="button"
                         style={{ ...smallBtn, marginTop: 8, width: "100%" }}
@@ -2175,7 +2194,15 @@ return type === "video" ? (
               {currentViewerItem.label ? ` · ${currentViewerItem.label}` : ""}
             </div>
 
-            {currentViewerItem.type === "video" ? (
+{currentViewerItem.type === "video" && /drive\.google\.com\/file\/d\//i.test(currentViewerItem.url) ? (
+  <iframe
+    src={currentViewerItem.url.replace(/\/view(?:\?.*)?$/, "/preview")}
+    title="Google Drive video"
+    allow="autoplay; fullscreen"
+    allowFullScreen
+    style={{ width: "100%", height: "70vh", border: 0, borderRadius: 12 }}
+  />
+) : currentViewerItem.type === "video" ? (
               <video
                 src={currentViewerItem.url}
                 controls
